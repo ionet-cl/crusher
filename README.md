@@ -700,6 +700,116 @@ config:
 }
 ```
 
+## AI Debug Mode (`--ai-debug`)
+
+Crush provides a powerful debugging mode with full transparency into internal operations. This mode is ideal for developers who want to understand how Crush processes requests, debug issues, or monitor API interactions.
+
+### Enabling Debug Mode
+
+```bash
+# Enable with default verbosity (normal)
+crush run --ai-debug "your prompt"
+crush chat --ai-debug
+
+# Enable with specific verbosity level
+crush run --ai-debug --verbosity minimal "prompt"
+crush run --ai-debug --verbosity full "prompt"
+crush run --ai-debug --verbosity raw "prompt"
+```
+
+### Verbosity Levels
+
+| Level | Description |
+|-------|-------------|
+| `minimal` | Only Pensamientos (thoughts) and Respuesta (response) |
+| `normal` | Tool calls + HTTP transparency (default) |
+| `full` | Everything including audit trail and timeline |
+| `tokens` | Only context bar display |
+| `raw` | Extreme debugging with **unredacted headers** (API keys visible) |
+
+### What Debug Mode Shows
+
+**HTTP Transparency**: Full request/response logging with:
+- Method, URL, headers (redacted by default, raw in `--verbosity raw`)
+- Request/response bodies with formatted JSON
+- Latency tracking (time in milliseconds)
+- Status codes with color-coded indicators
+
+**Agent Decision Visibility**:
+- `Pensamientos` - The model's reasoning/thinking process displayed in real-time
+- `Respuesta` - The final response output
+- Tool execution with input/output
+
+**Recovery & Circuit Breaker**:
+- Recovery audit trail showing error recovery attempts
+- Circuit breaker state (enabled/disabled, retries remaining)
+- Strategy used for recovery (ghost_compact, wait_retry, clean_retry)
+
+**Context & Tokens**:
+- Live context bar showing token usage percentage
+- Final token usage summary with prompt/completion breakdown
+
+### Example Output
+
+```
+ ╔══════════════════════════════════════════════════════════╗
+ ║  CRUSHER AI DEBUG  ║
+ ╠══════════════════════════════════════════════════════════╣
+ ║  Session: abc123ab  Model: MiniMax-M2.7-highspeed
+ ║  Type 'quit' to exit  •  'clear' to clear screen           ║
+ ╚══════════════════════════════════════════════════════════╝
+
+─── SESSION CONFIG ───
+  Mode:           X-RAY VISION
+  CircuitBreaker: true
+  GhostCount:     true
+  Provider:       minimax
+  ContextWindow:  200000
+
+═══ HTTP REQUEST ════════════════════════════════════════════
+▶ POST
+   URL: https://api.minimax.io/anthropic/v1/messages
+   Headers:
+      Authorization: [REDACTED]
+      X-Api-Key: [REDACTED]
+   Body (61530 bytes):
+{ ... }
+
+═══ HTTP RESPONSE ═══════════════════════════════════════════
+◀ 200 OK (200) in 1490ms
+   Body (1270 bytes):
+event: message_start
+...
+
+═══ Pensamientos [16:26:58] ═══════════════════════════
+The user is asking me to say "hello" in Spanish...
+
+═══ Respuesta [16:26:58] ═══════════════════════════
+Hola!
+
+═══ RECOVERY AUDIT TRAIL ═══════════════════════════
+  (no audit entries)
+
+═══ DEBUG SUMMARY ══════════════════════════════════
+  TotalAuditEntries: 0
+  TotalRecoveryAttempts: 0
+
+═══ AGENT END (SUCCESS) ═══════════════════════════
+  Duration:       4.382248131s
+  Success:        true
+```
+
+### Raw Mode (Extreme Debugging)
+
+Use `--verbosity raw` to see everything unredacted, including API keys and authentication headers:
+
+```bash
+crush run --ai-debug --verbosity raw "prompt"
+```
+
+> [!WARNING]
+> Raw mode exposes sensitive credentials. Use only in secure environments for debugging.
+
 ## Provider Auto-Updates
 
 By default, Crush automatically checks for the latest and greatest list of
