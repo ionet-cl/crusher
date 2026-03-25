@@ -3,7 +3,6 @@ package circuit
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -166,4 +165,45 @@ func containsHelper(s, substr string) bool {
 // BuildRecoveryMessage creates the recovery prompt message.
 func BuildRecoveryMessage(err error) string {
 	return fmt.Sprintf(RecoveryMessageTemplate, err.Error())
+}
+
+// isNetError checks if err is a network error that may be transient.
+func isNetError(err error) bool {
+	// Check net.Error interface (includes timeout, temporary errors)
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	// Check for syscall errors (connection reset, refused, etc.)
+	var syscallErr *url.Error
+	if errors.As(err, &syscallErr) {
+		errStr := syscallErr.Err.Error()
+		return isNetErrorString(errStr)
+	}
+
+	// Check error string patterns for network errors
+	return isNetErrorString(err.Error())
+}
+
+func isNetErrorString(s string) bool {
+	netPatterns := []string{
+		"connection reset",
+		"connection refused",
+		"connection timed out",
+		"timeout",
+		"EOF",
+		"unexpected EOF",
+		"network",
+		"read:",
+		"write:",
+		"dial",
+	}
+	s = strings.ToLower(s)
+	for _, pat := range netPatterns {
+		if strings.Contains(s, pat) {
+			return true
+		}
+	}
+	return false
 }

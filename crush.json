@@ -1,5 +1,9 @@
 {
   "$schema": "https://charm.land/crush.json",
+  "options": {
+    "enable_circuit_breaker": true,
+    "enable_ghost_count": true
+  },
   "lsp": {
     "gopls": {
       "options": {
