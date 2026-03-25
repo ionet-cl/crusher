@@ -182,6 +182,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			TopK:             topK,
 			FrequencyPenalty: freqPenalty,
 			PresencePenalty:  presPenalty,
+			ThinkCallback:    thinkCallback,
 		})
 	}
 	result, originalErr := run()
@@ -633,8 +634,11 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	apiKey, _ := c.cfg.Resolve(providerCfg.APIKey)
 	baseURL, _ := c.cfg.Resolve(providerCfg.BaseURL)
 
-	// Handle ZAI special case for tool_stream
+	// Handle special cases for providers
 	extraBody := providerCfg.ExtraBody
+	providerType := providerCfg.Type
+
+	// ZAI: enable tool_stream for better streaming
 	if providerCfg.ID == string(catwalk.InferenceProviderZAI) {
 		if extraBody == nil {
 			extraBody = map[string]any{}
@@ -642,8 +646,16 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 		extraBody["tool_stream"] = true
 	}
 
+	// MiniMax: use Anthropic-compatible endpoint for streaming thinking support
+	// The Anthropic endpoint at https://api.minimax.io/anthropic sends thinking_delta
+	// events which fantasy's anthropic provider handles correctly
+	if providerCfg.ID == "minimax" || providerCfg.ID == "minimax-china" {
+		providerType = anthropic.Name
+		baseURL = "https://api.minimax.io/anthropic"
+	}
+
 	cfg := providers.ProviderConfig{
-		Type:        string(providerCfg.Type),
+		Type:        string(providerType),
 		ID:          providerCfg.ID,
 		APIKey:      apiKey,
 		BaseURL:     baseURL,
