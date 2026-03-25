@@ -21,32 +21,32 @@ var runCmd = &cobra.Command{
 The prompt can be provided as arguments or piped from stdin.`,
 	Example: `
 # Run a simple prompt
-crush run "Guess my 5 favorite Pokémon"
+crusher run "Guess my 5 favorite Pokémon"
 
 # Pipe input from stdin
-curl https://charm.land | crush run "Summarize this website"
+curl https://charm.land | crusher run "Summarize this website"
 
 # Read from a file
-crush run "What is this code doing?" <<< prrr.go
+crusher run "What is this code doing?" <<< prrr.go
 
 # Redirect output to a file
-crush run "Generate a hot README for this project" > MY_HOT_README.md
+crusher run "Generate a hot README for this project" > MY_HOT_README.md
 
 # Run in quiet mode (hide the spinner)
-crush run --quiet "Generate a README for this project"
+crusher run --quiet "Generate a README for this project"
 
 # Run in verbose mode (show logs)
-crush run --verbose "Generate a README for this project"
+crusher run --verbose "Generate a README for this project"
 
 # AI DEBUG MODE: Full transparency, X-ray vision into all internal operations
 # Shows: audit trails, circuit breaker decisions, ghost compact, token usage
-crush run --ai-debug "Your prompt here"
+crusher run --ai-debug "Your prompt here"
 
 # Continue a previous session
-crush run --session {session-id} "Follow up on your last response"
+crusher run --session {session-id} "Follow up on your last response"
 
 # Continue the most recent session
-crush run --continue "Follow up on your last response"
+crusher run --continue "Follow up on your last response"
 
   `,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -54,6 +54,7 @@ crush run --continue "Follow up on your last response"
 			quiet, _      = cmd.Flags().GetBool("quiet")
 			verbose, _    = cmd.Flags().GetBool("verbose")
 			aiDebug, _    = cmd.Flags().GetBool("ai-debug")
+			verbosity, _  = cmd.Flags().GetString("verbosity")
 			largeModel, _ = cmd.Flags().GetString("model")
 			smallModel, _ = cmd.Flags().GetString("small-model")
 			sessionID, _  = cmd.Flags().GetString("session")
@@ -109,7 +110,7 @@ crush run --continue "Follow up on your last response"
 		}
 
 		if aiDebug {
-			return app.RunNonInteractiveDebug(ctx, os.Stdout, prompt, largeModel, smallModel, sessionID, useLast)
+			return app.RunNonInteractiveDebug(ctx, os.Stdout, prompt, largeModel, smallModel, verbosity, sessionID, useLast)
 		}
 		return app.RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
 	},
@@ -119,6 +120,7 @@ func init() {
 	runCmd.Flags().BoolP("quiet", "q", false, "Hide spinner")
 	runCmd.Flags().BoolP("verbose", "v", false, "Show logs")
 	runCmd.Flags().Bool("ai-debug", false, "AI Debug mode: pure CLI with full transparency, X-ray vision into all internal operations")
+	runCmd.Flags().String("verbosity", "normal", "Verbosity level for ai-debug mode: minimal, normal, full, tokens")
 	runCmd.Flags().StringP("model", "m", "", "Model to use. Accepts 'model' or 'provider/model' to disambiguate models with the same name across providers")
 	runCmd.Flags().String("small-model", "", "Small model to use. If not provided, uses the default small model for the provider")
 	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")

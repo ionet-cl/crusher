@@ -40,6 +40,7 @@ func init() {
 	rootCmd.Flags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
 	rootCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	rootCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
+	rootCmd.Flags().Bool("ai-debug", false, "AI Debug mode: full transparency, X-ray vision into all internal operations")
 	rootCmd.MarkFlagsMutuallyExclusive("session", "continue")
 
 	rootCmd.AddCommand(
@@ -57,33 +58,36 @@ func init() {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "crush",
+	Use:   "crusher",
 	Short: "A terminal-first AI assistant for software development",
 	Long:  "A glamorous, terminal-first AI assistant for software development and adjacent tasks",
 	Example: `
 # Run in interactive mode
-crush
+crusher
 
 # Run non-interactively
-crush run "Guess my 5 favorite Pokémon"
+crusher run "Guess my 5 favorite Pokémon"
 
 # Run a non-interactively with pipes and redirection
-cat README.md | crush run "make this more glamorous" > GLAMOROUS_README.md
+cat README.md | crusher run "make this more glamorous" > GLAMOROUS_README.md
 
 # Run with debug logging in a specific directory
-crush --debug --cwd /path/to/project
+crusher --debug --cwd /path/to/project
 
 # Run in yolo mode (auto-accept all permissions; use with care)
-crush --yolo
+crusher --yolo
 
 # Run with custom data directory
-crush --data-dir /path/to/custom/.crush
+crusher --data-dir /path/to/custom/.crush
 
 # Continue a previous session
-crush --session {session-id}
+crusher --session {session-id}
 
 # Continue the most recent session
-crush --continue
+crusher --continue
+
+# AI Debug mode: full transparency, X-ray vision into all internal operations
+crusher --ai-debug
   `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sessionID, _ := cmd.Flags().GetString("session")
@@ -106,11 +110,13 @@ crush --continue
 
 		event.AppInitialized()
 
+		aiDebug, _ := cmd.Flags().GetBool("ai-debug")
+
 		// Set up the TUI.
 		var env uv.Environ = os.Environ()
 
 		com := common.DefaultCommon(app)
-		model := ui.New(com, sessionID, continueLast)
+		model := ui.New(com, sessionID, continueLast, aiDebug)
 
 		program := tea.NewProgram(
 			model,

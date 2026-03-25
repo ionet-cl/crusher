@@ -7,9 +7,6 @@ import (
 	"log/slog"
 	"strings"
 	"time"
-
-	"github.com/charmbracelet/crush/internal/agent/circuit"
-	"github.com/charmbracelet/crush/internal/message"
 )
 
 // ── ANSI Color Constants ──────────────────────────────────────────────
@@ -40,47 +37,554 @@ const (
 	_ICON_THINK   = _MAGENTA + "◆" + _RESET
 	_ICON_TOOL    = _YELLOW + "▶" + _RESET
 	_ICON_TOKEN   = _CYAN + "◇" + _RESET
+	_ICON_COMPACT = _RED + "⚡" + _RESET
+	_ICON_CLOCK   = _CYAN + "⏱" + _RESET
 )
+
+// ── Verbosity Levels ──────────────────────────────────────────────
+
+// VerbosityLevel defines how much detail to show in debug output.
+type VerbosityLevel int
+
+const (
+	VerbosityMinimal VerbosityLevel = iota // Only Pensamientos + Respuesta
+	VerbosityNormal                        // + Tool calls
+	VerbosityFull                          // Everything including audit trail
+	VerbosityTokens                        // Only context bar
+)
+
+func (v VerbosityLevel) String() string {
+	switch v {
+	case VerbosityMinimal:
+		return "minimal"
+	case VerbosityNormal:
+		return "normal"
+	case VerbosityFull:
+		return "full"
+	case VerbosityTokens:
+		return "tokens"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseVerbosity parses a verbosity string like "minimal", "normal", "full", "tokens".
+func ParseVerbosity(s string) VerbosityLevel {
+	switch strings.ToLower(s) {
+	case "minimal":
+		return VerbosityMinimal
+	case "normal":
+		return VerbosityNormal
+	case "full":
+		return VerbosityFull
+	case "tokens":
+		return VerbosityTokens
+	default:
+		return VerbosityNormal
+	}
+}
+
+// ── DebugConfig ──────────────────────────────────────────────
 
 // DebugConfig holds configuration for debug output.
 type DebugConfig struct {
-	ShowAuditTrail     bool
-	ShowCircuitBreaker bool
-	ShowGhostCompact   bool
-	ShowTokenUsage     bool
-	ShowToolCalls      bool
-	ShowMessages       bool
-	ShowRecovery       bool
-	ShowAllState       bool
+	Verbosity        VerbosityLevel
+	ShowPensamientos  bool
+	ShowRespuesta    bool
+	ShowToolCalls    bool
+	ShowContextBar   bool
+	ShowTimeline     bool
+	ShowAuditTrail   bool
+	ShowGhostCompact bool
+	ShowTokenUsage   bool
+	ShowState       bool
 }
 
 // DefaultDebugConfig returns a config with all debug features enabled.
 func DefaultDebugConfig() DebugConfig {
 	return DebugConfig{
-		ShowAuditTrail:     true,
-		ShowCircuitBreaker: true,
-		ShowGhostCompact:   true,
-		ShowTokenUsage:     true,
-		ShowToolCalls:      true,
-		ShowMessages:       true,
-		ShowRecovery:       true,
-		ShowAllState:       true,
+		Verbosity:        VerbosityNormal,
+		ShowPensamientos:  true,
+		ShowRespuesta:    true,
+		ShowToolCalls:    true,
+		ShowContextBar:   true,
+		ShowTimeline:     true,
+		ShowAuditTrail:   true,
+		ShowGhostCompact: true,
+		ShowTokenUsage:   true,
+		ShowState:        true,
 	}
 }
 
+// MinimalDebugConfig returns a minimal config (Pensamientos + Respuesta only).
+func MinimalDebugConfig() DebugConfig {
+	return DebugConfig{
+		Verbosity:        VerbosityMinimal,
+		ShowPensamientos:  true,
+		ShowRespuesta:    true,
+		ShowToolCalls:    false,
+		ShowContextBar:   true,
+		ShowTimeline:     false,
+		ShowAuditTrail:   false,
+		ShowGhostCompact: false,
+		ShowTokenUsage:   false,
+		ShowState:        false,
+	}
+}
+
+// TokensDebugConfig returns a tokens-only config.
+func TokensDebugConfig() DebugConfig {
+	return DebugConfig{
+		Verbosity:        VerbosityTokens,
+		ShowPensamientos:  false,
+		ShowRespuesta:    false,
+		ShowToolCalls:    false,
+		ShowContextBar:   true,
+		ShowTimeline:     false,
+		ShowAuditTrail:   false,
+		ShowGhostCompact: false,
+		ShowTokenUsage:   false,
+		ShowState:        false,
+	}
+}
+
+// FullDebugConfig returns a config with absolutely everything enabled.
+func FullDebugConfig() DebugConfig {
+	return DebugConfig{
+		Verbosity:        VerbosityFull,
+		ShowPensamientos:  true,
+		ShowRespuesta:    true,
+		ShowToolCalls:    true,
+		ShowContextBar:   true,
+		ShowTimeline:     true,
+		ShowAuditTrail:   true,
+		ShowGhostCompact: true,
+		ShowTokenUsage:   true,
+		ShowState:        true,
+	}
+}
+
+// DebugConfigFromVerbosity returns the appropriate DebugConfig based on verbosity string.
+func DebugConfigFromVerbosity(verbosity string) DebugConfig {
+	switch verbosity {
+	case "minimal":
+		return MinimalDebugConfig()
+	case "full":
+		return FullDebugConfig()
+	case "tokens":
+		return TokensDebugConfig()
+	default: // "normal"
+		return DefaultDebugConfig()
+	}
+}
+
+// ── Timeline Event ──────────────────────────────────────────────
+
+// TimelineEvent represents a timestamped event in the debug timeline.
+type TimelineEvent struct {
+	Timestamp time.Time
+	Type      string
+	Message   string
+	Duration  time.Duration
+	Success   bool
+}
+
+// ── AIDebugger ──────────────────────────────────────────────
+
 // AIDebugger provides structured debug output for AI operations.
 type AIDebugger struct {
-	config DebugConfig
-	output *strings.Builder
+	config         DebugConfig
+	output         *strings.Builder
+	thinkBuffer    *strings.Builder
+	events         []TimelineEvent
+	contextPct     float64
+	contextUsed    int
+	contextMax     int
+	sessionID      string
+	thinkStart    time.Time
+	respStart     time.Time
+	toolCount     int
+	typewriterMode bool
+	pensamientosCollapsed bool
 }
 
 // NewAIDebugger creates a new AI debugger.
 func NewAIDebugger(config DebugConfig) *AIDebugger {
 	return &AIDebugger{
-		config: config,
-		output: &strings.Builder{},
+		config:      config,
+		output:      &strings.Builder{},
+		thinkBuffer: &strings.Builder{},
+		events:      make([]TimelineEvent, 0),
 	}
 }
+
+// SetPensamientosCollapsed toggles whether pensamientos are collapsed.
+func (d *AIDebugger) SetPensamientosCollapsed(collapsed bool) {
+	d.pensamientosCollapsed = collapsed
+}
+
+// IsPensamientosCollapsed returns whether pensamientos are currently collapsed.
+func (d *AIDebugger) IsPensamientosCollapsed() bool {
+	return d.pensamientosCollapsed
+}
+
+// ── Context Bar (Live Token Counter) ──────────────────────────────────────────
+
+// PrintContextBar prints the live context usage bar.
+// This should be called periodically during streaming.
+func (d *AIDebugger) PrintContextBar() {
+	if !d.config.ShowContextBar {
+		return
+	}
+	barWidth := 20
+	filledBars := int(float64(barWidth) * d.contextPct / 100)
+	emptyBars := barWidth - filledBars
+
+	// Color based on usage level
+	barColor := _GREEN
+	if d.contextPct > 75 {
+		barColor = _YELLOW
+	}
+	if d.contextPct > 90 {
+		barColor = _RED
+	}
+
+	bar := barColor + strings.Repeat("█", filledBars) + _DIM + strings.Repeat("░", emptyBars) + _RESET
+
+	d.output.WriteString(fmt.Sprintf("\r  %s %s %s %.0f%% (%d/%d)    ",
+		_ICON_TOKEN,
+		_GRAY+"Context:"+_RESET,
+		bar,
+		d.contextPct,
+		d.contextUsed,
+		d.contextMax))
+}
+
+// UpdateContext updates the context usage for the live bar.
+func (d *AIDebugger) UpdateContext(used, max int) {
+	d.contextUsed = used
+	d.contextMax = max
+	if max > 0 {
+		d.contextPct = float64(used) / float64(max) * 100
+	}
+}
+
+// ── Timeline ──────────────────────────────────────────────
+
+// AddTimelineEvent adds an event to the debug timeline.
+func (d *AIDebugger) AddTimelineEvent(eventType, message string, success bool) {
+	if !d.config.ShowTimeline {
+		return
+	}
+	d.events = append(d.events, TimelineEvent{
+		Timestamp: time.Now(),
+		Type:      eventType,
+		Message:   message,
+		Success:   success,
+	})
+}
+
+// AddTimelineEventWithDuration adds an event with a duration.
+func (d *AIDebugger) AddTimelineEventWithDuration(eventType, message string, duration time.Duration, success bool) {
+	if !d.config.ShowTimeline {
+		return
+	}
+	d.events = append(d.events, TimelineEvent{
+		Timestamp: time.Now(),
+		Type:      eventType,
+		Message:   message,
+		Duration:  duration,
+		Success:   success,
+	})
+}
+
+// PrintTimeline prints all collected timeline events.
+func (d *AIDebugger) PrintTimeline() {
+	if !d.config.ShowTimeline || len(d.events) == 0 {
+		return
+	}
+	d.Header("TIMELINE")
+	for _, e := range d.events {
+		icon := _ICON_SUCCESS
+		if !e.Success {
+			icon = _ICON_ERROR
+		}
+		durationStr := ""
+		if e.Duration > 0 {
+			durationStr = fmt.Sprintf(" (%.3fs)", e.Duration.Seconds())
+		}
+		d.output.WriteString(fmt.Sprintf("  %s %s %s%s\n",
+			icon,
+			e.Timestamp.Format("15:04:05"),
+			_GRAY+e.Message+_RESET,
+			durationStr))
+	}
+}
+
+// ── Pensamientos (Thoughts) Streaming ──────────────────────────────────────────
+
+// StartPensamientos marks the start of thinking stream.
+func (d *AIDebugger) StartPensamientos() {
+	if !d.config.ShowPensamientos {
+		return
+	}
+	d.thinkStart = time.Now()
+	d.thinkBuffer.Reset()
+	d.Header(fmt.Sprintf("Pensamientos [%s]", d.thinkStart.Format("15:04:05")))
+}
+
+// PrintPensamientoChunk prints a chunk of thinking content inline (for streaming).
+// In typewriter mode, this overwrites the same line instead of appending.
+// When collapsed, shows a minimal indicator instead of full content.
+func (d *AIDebugger) PrintPensamientoChunk(content string) {
+	if !d.config.ShowPensamientos {
+		return
+	}
+	if d.pensamientosCollapsed {
+		// Show minimal indicator when collapsed
+		d.output.WriteString(fmt.Sprintf("%s◇%s", _MAGENTA, _RESET))
+	} else {
+		if d.typewriterMode {
+			// Overwrite same line (typewriter effect)
+			clearLine := "\r" + strings.Repeat(" ", 120) + "\r"
+			d.output.WriteString(clearLine)
+		}
+		d.output.WriteString(fmt.Sprintf("%s", _MAGENTA+content+_RESET))
+	}
+	d.thinkBuffer.WriteString(content)
+}
+
+// PrintPensamientoLine prints a full line of thinking content.
+func (d *AIDebugger) PrintPensamientoLine(line string) {
+	if !d.config.ShowPensamientos {
+		return
+	}
+	d.output.WriteString(fmt.Sprintf("  %s %s%s%s\n", _ICON_THINK, _MAGENTA, line, _RESET))
+	d.thinkBuffer.WriteString(line)
+}
+
+// EndPensamientos marks the end of thinking and prints duration.
+func (d *AIDebugger) EndPensamientos() {
+	if !d.config.ShowPensamientos {
+		return
+	}
+	if d.thinkStart.IsZero() {
+		return
+	}
+	duration := time.Since(d.thinkStart)
+	d.output.WriteString(fmt.Sprintf("\n  %s %s (%.3fs)\n", _ICON_CLOCK, _GRAY+"Pensamiento completado"+_RESET, duration.Seconds()))
+}
+
+// SetTypewriterMode enables or disables typewriter mode for streaming.
+func (d *AIDebugger) SetTypewriterMode(enabled bool) {
+	d.typewriterMode = enabled
+}
+
+// ── Respuesta ──────────────────────────────────────────────
+
+// StartRespuesta marks the start of response output.
+func (d *AIDebugger) StartRespuesta() {
+	if !d.config.ShowRespuesta {
+		return
+	}
+	d.respStart = time.Now()
+	d.Header(fmt.Sprintf("Respuesta [%s]", d.respStart.Format("15:04:05")))
+}
+
+// EndRespuesta marks the end of response output.
+func (d *AIDebugger) EndRespuesta() {
+	if !d.config.ShowRespuesta {
+		return
+	}
+	if d.respStart.IsZero() {
+		return
+	}
+	duration := time.Since(d.respStart)
+	d.output.WriteString(fmt.Sprintf("\n  %s %s (%.3fs)\n", _ICON_CLOCK, _GRAY+"Respuesta completada"+_RESET, duration.Seconds()))
+}
+
+// ── Tool Calls ──────────────────────────────────────────────
+
+// PrintToolCall prints a tool call with styled output.
+func (d *AIDebugger) PrintToolCall(name string, input map[string]interface{}, output string, err error) {
+	if !d.config.ShowToolCalls {
+		return
+	}
+	d.toolCount++
+	d.AddTimelineEvent("TOOL", fmt.Sprintf("[%d] %s", d.toolCount, name), err == nil)
+
+	icon := _ICON_TOOL
+	if err != nil {
+		icon = _ICON_ERROR
+	}
+
+	d.output.WriteString(fmt.Sprintf("\n%s %s%s%s #%d: %s%s\n",
+		_MAGENTA+"┌─"+_RESET,
+		icon,
+		_BOLD+name+_RESET,
+		_MAGENTA+" ──────────────────────────────"+_RESET,
+		d.toolCount,
+		_GRAY+time.Now().Format("15:04:05")+_RESET))
+
+	inputJSON, _ := json.MarshalIndent(input, "  ", "  ")
+	d.output.WriteString(fmt.Sprintf("%s  %sInput:\n%s%s\n",
+		_MAGENTA+"│"+_RESET,
+		_GRAY,
+		indentString(string(inputJSON), "  │   "),
+		_RESET))
+
+	if err != nil {
+		d.output.WriteString(fmt.Sprintf("%s  %sError: %s%s\n",
+			_MAGENTA+"│"+_RESET,
+			_RED,
+			err.Error(),
+			_RESET))
+		d.output.WriteString(fmt.Sprintf("%s└─ %s%ds%s\n",
+			_MAGENTA,
+			_RED,
+			d.toolCount,
+			strings.Repeat("─", 30)))
+	} else {
+		d.output.WriteString(fmt.Sprintf("%s  %sOutput: %s%s\n",
+			_MAGENTA+"│"+_RESET,
+			_GREEN,
+			truncateString(output, 200),
+			_RESET))
+		d.output.WriteString(fmt.Sprintf("%s└─ %s%ds%s\n",
+			_MAGENTA,
+			_GREEN,
+			d.toolCount,
+			strings.Repeat("─", 30)))
+	}
+}
+
+// PrintToolStart prints just the tool start (for streaming tools).
+func (d *AIDebugger) PrintToolStart(name string) {
+	if !d.config.ShowToolCalls {
+		return
+	}
+	d.toolCount++
+	d.AddTimelineEvent("TOOL_START", fmt.Sprintf("[%d] %s started", d.toolCount, name), true)
+	d.output.WriteString(fmt.Sprintf("\n%s %s%s #%d: %s\n",
+		_MAGENTA+"┌─"+_RESET,
+		_YELLOW+"▶"+_RESET,
+		_BOLD+name+_RESET,
+		d.toolCount,
+		_GRAY+"(ejecutando...)"+_RESET))
+}
+
+// PrintToolEnd prints just the tool end (for streaming tools).
+func (d *AIDebugger) PrintToolEnd(name string, duration time.Duration, err error) {
+	if !d.config.ShowToolCalls {
+		return
+	}
+	success := err == nil
+	d.AddTimelineEventWithDuration("TOOL_END", fmt.Sprintf("[%d] %s", d.toolCount, name), duration, success)
+
+	if err != nil {
+		d.output.WriteString(fmt.Sprintf("%s└─ %s%s #%d: %s (%.3fs)\n",
+			_MAGENTA,
+			_RED,
+			name,
+			d.toolCount,
+			truncateString(err.Error(), 50),
+			duration.Seconds()))
+	} else {
+		d.output.WriteString(fmt.Sprintf("%s└─ %s%s #%d: %s (%.3fs)\n",
+			_MAGENTA,
+			_GREEN,
+			name,
+			d.toolCount,
+			"completado",
+			duration.Seconds()))
+	}
+}
+
+// ── Ghost Compact Alert ──────────────────────────────────────────────
+
+// PrintGhostCompactAlert prints a prominent ghost compact alert.
+func (d *AIDebugger) PrintGhostCompactAlert(beforeTokens, afterTokens int, err error) {
+	if !d.config.ShowGhostCompact {
+		return
+	}
+	d.AddTimelineEvent("GHOST_COMPACT", fmt.Sprintf("Tokens: %d → %d", beforeTokens, afterTokens), err == nil)
+
+	removed := beforeTokens - afterTokens
+	reductionPct := 0.0
+	if beforeTokens > 0 {
+		reductionPct = float64(removed) / float64(beforeTokens) * 100
+	}
+
+	// Build visual bars
+	barWidth := 15
+	beforeBars := barWidth
+	afterBars := 0
+	if beforeTokens > 0 {
+		afterBars = int(float64(barWidth) * float64(afterTokens) / float64(beforeTokens))
+		beforeBars = barWidth - afterBars
+	}
+
+	d.output.WriteString(fmt.Sprintf(`
+%$s ╔═══════════════════════════════════════════════════════════════╗%s
+%$s ║%s  %$s⚡ GHOST COMPACT%s                                     %s║%s
+%$s ╠═══════════════════════════════════════════════════════════════╣%s
+%$s ║%s  Antes:  %$s%s%s  %d tokens                        %s║%s
+%$s ║%s  Después: %s%s%s  %d tokens                        %s║%s
+%$s ║%s  %s▲ %.0f%% reduction%s (%d tokens saved)                   %s║%s
+%$s ╚═══════════════════════════════════════════════════════════════╝%s
+`,
+		_RED, _RESET,
+		_RED, _RESET, _BOLD, _RESET, _RED, _RESET,
+		_RED, _RESET,
+		_RED, _RESET, _RED, strings.Repeat("█", beforeBars), _RESET, beforeTokens, _RED, _RESET,
+		_RED, _RESET, _GREEN, strings.Repeat("█", afterBars), _RESET, afterTokens, _GREEN, _RESET,
+		_RED, _RESET, _GREEN, reductionPct, _GREEN, removed, _RED, _RESET,
+		_RED, _RESET))
+
+	if err != nil {
+		d.output.WriteString(fmt.Sprintf("  %s Error: %s\n", _ICON_ERROR, err.Error()))
+	}
+}
+
+// ── Provider Error ──────────────────────────────────────────────
+
+// ProviderErrorWrapper wraps fantasy.ProviderError for debug display.
+type ProviderErrorWrapper struct {
+	Title             string
+	Message           string
+	StatusCode        int
+	ContextTooLarge   bool
+	Retryable         bool
+	ContextUsedTokens int
+	ContextMaxTokens  int
+}
+
+// PrintProviderError prints a provider error with full details.
+func (d *AIDebugger) PrintProviderError(sessionID string, err *ProviderErrorWrapper) {
+	if err == nil {
+		return
+	}
+	d.Header("PROVIDER ERROR")
+	d.KV("SessionID", sessionID)
+	d.KV("Title", err.Title)
+	d.KV("Message", err.Message)
+	d.KV("StatusCode", err.StatusCode)
+
+	if err.ContextTooLarge {
+		d.KVWarn("ContextTooLarge", "Context window exceeded")
+		d.KV("ContextUsed", fmt.Sprintf("%d / %d tokens (%.1f%%)",
+			err.ContextUsedTokens, err.ContextMaxTokens,
+			float64(err.ContextUsedTokens)/float64(err.ContextMaxTokens)*100))
+	}
+
+	if err.Retryable {
+		d.KVInfo("Retryable", "This error may be resolved by retrying")
+	} else {
+		d.KV("Retryable", "No")
+	}
+}
+
+// ── Header/Section Methods ──────────────────────────────────────────────
 
 // Header prints a section header with brand styling.
 func (d *AIDebugger) Header(section string) {
@@ -117,14 +621,23 @@ func (d *AIDebugger) KVInfo(key string, value interface{}) {
 	d.output.WriteString(fmt.Sprintf("  %s %-28s %s\n", _ICON_INFO, _GRAY+key+":"+_RESET, _CYAN+fmt.Sprintf("%v", value)+_RESET))
 }
 
-// KVColored prints a key-value pair with color (for terminal).
-func (d *AIDebugger) KVColored(key string, value interface{}) {
-	d.output.WriteString(fmt.Sprintf("  %s %-28s %v\n", _CYAN+key+":"+_RESET, "", value))
-}
-
 // Separator prints a separator line.
 func (d *AIDebugger) Separator() {
 	d.output.WriteString(_DIM + "  " + strings.Repeat("─", 58) + _RESET + "\n")
+}
+
+// ── Legacy/Compatibility Methods ──────────────────────────────────────────────
+
+// PrintBanner prints an initial banner for AI debug mode.
+func (d *AIDebugger) PrintBanner(sessionID string, model string) {
+	d.sessionID = sessionID
+	d.output.WriteString(fmt.Sprintf("\n%s ╔══════════════════════════════════════════════════════════╗%s\n%s ║%s  CRUSHER AI DEBUG  ║%s\n%s ╠══════════════════════════════════════════════════════════╣%s\n%s ║  Session: %-8s  Model: %s%s\n%s ║  Type 'quit' to exit  •  'clear' to clear screen           ║%s\n%s ╚══════════════════════════════════════════════════════════╝%s\n",
+		_CYAN, _RESET,
+		_CYAN, _RESET,
+		_CYAN, _RESET,
+		_CYAN, _RESET, sessionID[:8], _CYAN, _WHITE+model+_RESET,
+		_CYAN, _RESET,
+		_CYAN, _RESET))
 }
 
 // PrintAuditEntry prints a recovery audit entry with full detail.
@@ -181,90 +694,8 @@ func (d *AIDebugger) PrintAllAuditTrail(entries []AuditEntry) {
 	}
 }
 
-// PrintCircuitBreakerState prints the current circuit breaker state.
-func (d *AIDebugger) PrintCircuitBreakerState(sessionID string, errInfo circuit.ErrInfo, recoverable bool) {
-	if !d.config.ShowCircuitBreaker {
-		return
-	}
-	d.Header("CIRCUIT BREAKER STATE")
-	d.KV("SessionID", sessionID)
-	d.KV("ErrorDetected", errInfo.ErrMsg)
-	d.KV("Recoverable", recoverable)
-	d.KV("Strategy", StrategyName(errInfo.Strategy))
-	d.KV("Delay", errInfo.Delay)
-}
-
-// PrintGhostCompactOp prints a ghost compact operation with visual progress bar.
-func (d *AIDebugger) PrintGhostCompactOp(sessionID string, beforeTokens, afterTokens int, err error) {
-	if !d.config.ShowGhostCompact {
-		return
-	}
-	d.Header("GHOST COMPACT OPERATION")
-	d.KV("SessionID", sessionID)
-
-	// Visual progress bar for token reduction
-	removed := beforeTokens - afterTokens
-	reductionPct := 0.0
-	if beforeTokens > 0 {
-		reductionPct = float64(removed) / float64(beforeTokens) * 100
-	}
-
-	// Before bar (green) -> After bar (cyan)
-	barWidth := 30
-	beforeBars := barWidth
-	afterBars := 0
-	if beforeTokens > 0 {
-		afterBars = int(float64(barWidth) * float64(afterTokens) / float64(beforeTokens))
-		beforeBars = barWidth - afterBars
-	}
-
-	beforeBar := _RED + strings.Repeat("█", beforeBars) + _RESET
-	afterBar := _GREEN + strings.Repeat("█", afterBars) + _RESET
-	d.output.WriteString(fmt.Sprintf("  %-20s %s%s %d\n", _GRAY+"Tokens:"+_RESET, beforeBar, afterBar, beforeTokens))
-	d.output.WriteString(fmt.Sprintf("  %-20s %s%s %d (%s removed)\n", "", "", "", afterTokens, _RED+fmt.Sprintf("-%d", removed)+_RESET))
-	d.output.WriteString(fmt.Sprintf("  %-20s %s%.1f%% reduction\n", _GRAY+"Reduction:"+_RESET, _GREEN, reductionPct))
-
-	if err != nil {
-		d.KVError("Error", err.Error())
-	} else {
-		d.KVSuccess("Status", "Compact successful")
-	}
-}
-
-// PrintProviderError prints a provider error in detail.
-func (d *AIDebugger) PrintProviderError(sessionID string, err *ProviderErrorWrapper) {
-	if err == nil {
-		return
-	}
-	d.Header("PROVIDER ERROR")
-	d.KVError("Title", err.Title)
-	d.KV("SessionID", sessionID)
-	d.KV("Message", truncateString(err.Message, 80))
-	d.KV("StatusCode", err.StatusCode)
-
-	if err.ContextTooLarge {
-		d.KVWarn("ContextTooLarge", "Yes - context window exceeded")
-	}
-	if err.Retryable {
-		d.KVInfo("Retryable", "Yes - can retry")
-	}
-	d.KV("ContextUsedTokens", err.ContextUsedTokens)
-	d.KV("ContextMaxTokens", err.ContextMaxTokens)
-}
-
-// ProviderErrorWrapper wraps fantasy.ProviderError for debug output.
-type ProviderErrorWrapper struct {
-	Title             string
-	Message           string
-	StatusCode        int
-	ContextTooLarge   bool
-	Retryable         bool
-	ContextUsedTokens int
-	ContextMaxTokens  int
-}
-
 // PrintTokenUsage prints token usage with a visual progress bar.
-func (d *AIDebugger) PrintTokenUsage(sessionID string, promptTokens, completionTokens, totalTokens, contextWindow int) {
+func (d *AIDebugger) PrintTokenUsage(promptTokens, completionTokens, totalTokens, contextWindow int) {
 	if !d.config.ShowTokenUsage {
 		return
 	}
@@ -289,87 +720,13 @@ func (d *AIDebugger) PrintTokenUsage(sessionID string, promptTokens, completionT
 	}
 
 	bar := barColor + strings.Repeat("█", filledBars) + _DIM + strings.Repeat("░", emptyBars) + _RESET
-	d.output.WriteString(fmt.Sprintf("  %s %s %s %.1f%%\n", _ICON_TOKEN, _GRAY+"Context:"+_RESET, bar, usagePct))
+	d.output.WriteString(fmt.Sprintf("  %s %s %s %s %.1f%%\n", _ICON_TOKEN, _GRAY+"Context:"+_RESET, bar, _GRAY, usagePct))
 
 	// Token breakdown
 	d.output.WriteString(fmt.Sprintf("  %s %-15s %s %d\n", _ICON_INFO, _GRAY+"Prompt:"+_RESET, _CYAN, promptTokens))
 	d.output.WriteString(fmt.Sprintf("  %s %-15s %s %d\n", _ICON_INFO, _GRAY+"Completion:"+_RESET, _CYAN, completionTokens))
 	d.output.WriteString(fmt.Sprintf("  %s %-15s %s %d\n", _ICON_THINK, _GRAY+"Total:"+_RESET, _WHITE+_BOLD, totalTokens))
 	d.output.WriteString(fmt.Sprintf("  %s %-15s %d\n", _ICON_TOKEN, _GRAY+"Remaining:"+_RESET, contextWindow-totalTokens))
-}
-
-// PrintMessage prints a message in the debug output.
-func (d *AIDebugger) PrintMessage(msg message.Message) {
-	if !d.config.ShowMessages {
-		return
-	}
-	d.SubHeader(fmt.Sprintf("MESSAGE [%s]", msg.Role))
-	d.KV("ID", msg.ID)
-	d.KV("Role", msg.Role)
-	d.KV("Model", msg.Model)
-	d.KV("Provider", msg.Provider)
-	content := msg.Content().Text
-	d.KV("Content", truncateString(content, 200))
-}
-
-// PrintToolCall prints a tool call with styled output.
-func (d *AIDebugger) PrintToolCall(name string, input map[string]interface{}, output string, err error) {
-	if !d.config.ShowToolCalls {
-		return
-	}
-	d.SubHeader(fmt.Sprintf("TOOL CALL: %s", name))
-	inputJSON, _ := json.MarshalIndent(input, "  ", "  ")
-	d.output.WriteString(fmt.Sprintf("  %s %s\n", _ICON_TOOL, _GRAY+"Input:"+_RESET))
-	d.output.WriteString(fmt.Sprintf("%s", indentString(string(inputJSON), "    ")))
-	if err != nil {
-		d.KVError("Error", truncateString(err.Error(), 200))
-	} else {
-		d.output.WriteString(fmt.Sprintf("  %s %s\n", _ICON_SUCCESS, _GRAY+"Output:"+_RESET))
-		d.output.WriteString(fmt.Sprintf("    %s\n", _CYAN+truncateString(output, 200)+_RESET))
-	}
-}
-
-// PrintRecoveryAttempt prints a recovery attempt.
-func (d *AIDebugger) PrintRecoveryAttempt(sessionID string, strategy circuit.Strategy, attempt int, maxRetries int) {
-	if !d.config.ShowRecovery {
-		return
-	}
-	d.Header(fmt.Sprintf("RECOVERY ATTEMPT #%d", attempt))
-	d.KV("SessionID", sessionID)
-	d.KV("Strategy", StrategyName(strategy))
-	d.KV("Attempt", fmt.Sprintf("%d/%d", attempt, maxRetries))
-}
-
-// PrintStateChange prints a state change in the agent.
-func (d *AIDebugger) PrintStateChange(sessionID, fromState, toState string) {
-	if !d.config.ShowAllState {
-		return
-	}
-	d.KVColored("STATE", fmt.Sprintf("%s → %s", fromState, toState))
-}
-
-// PrintAgentStart prints agent start information.
-func (d *AIDebugger) PrintAgentStart(sessionID, prompt string, model, provider string) {
-	d.Header("AGENT START")
-	d.KV("SessionID", sessionID)
-	d.KV("Model", _CYAN+model+_RESET)
-	d.KV("Provider", _CYAN+provider+_RESET)
-	d.KV("Prompt", truncateString(prompt, 300))
-}
-
-// PrintAgentEnd prints agent end information.
-func (d *AIDebugger) PrintAgentEnd(sessionID string, duration time.Duration, success bool, err error) {
-	d.Header("AGENT END")
-	d.KV("SessionID", sessionID)
-	d.KV("Duration", duration)
-	if success {
-		d.KVSuccess("Success", "Agent completed successfully")
-	} else {
-		d.KVError("Success", "Agent encountered an error")
-	}
-	if err != nil {
-		d.KVError("Error", truncateString(err.Error(), 100))
-	}
 }
 
 // PrintSummary prints a summary of all debug information.
@@ -397,28 +754,29 @@ func (d *AIDebugger) PrintSummary(entries []AuditEntry, totalRetries int) {
 		d.KV("TotalAuditEntries", 0)
 		d.KV("TotalRecoveryAttempts", totalRetries)
 	}
+
+	// Print final context bar
+	if d.config.ShowContextBar && d.contextMax > 0 {
+		d.output.WriteString("\n")
+		d.KV("ContextUsage", fmt.Sprintf("%d/%d (%.1f%%)", d.contextUsed, d.contextMax, d.contextPct))
+	}
 }
 
-// PrintThinkContent prints streaming think content with visual indentation.
-func (d *AIDebugger) PrintThinkContent(content string) {
-	d.output.WriteString(fmt.Sprintf("  %s %s%s%s\n", _ICON_THINK, _MAGENTA, content, _RESET))
+// PrintSessionConfig prints session configuration.
+func (d *AIDebugger) PrintSessionConfig(provider string, contextWindow int) {
+	d.SubHeader("SESSION CONFIG")
+	d.KV("Mode", _CYAN+"X-RAY VISION"+_RESET)
+	d.KV("Verbosity", d.config.Verbosity.String())
+	d.KV("Provider", _CYAN+provider+_RESET)
+	d.KV("ContextWindow", contextWindow)
 }
 
-// PrintThinkChunk prints a chunk of think content inline (for streaming).
-func (d *AIDebugger) PrintThinkChunk(content string) {
-	d.output.WriteString(fmt.Sprintf("%s", _MAGENTA+content+_RESET))
+// PrintPensamientos is alias for StartPensamientos (for compatibility).
+func (d *AIDebugger) PrintPensamientos() {
+	d.StartPensamientos()
 }
 
-// PrintBanner prints an initial banner for AI debug mode.
-func (d *AIDebugger) PrintBanner(sessionID string, model string) {
-	d.output.WriteString(fmt.Sprintf("\n%s ╔══════════════════════════════════════════════════════════╗%s\n%s ║%s  CRUSHER AI DEBUG  ║%s\n%s ╠══════════════════════════════════════════════════════════╣%s\n%s ║  Session: %-8s  Model: %s%s\n%s ║  Type 'quit' to exit  •  'clear' to clear screen           ║%s\n%s ╚══════════════════════════════════════════════════════════╝%s\n",
-		_CYAN, _RESET,
-		_CYAN, _RESET,
-		_CYAN, _RESET,
-		_CYAN, _RESET, sessionID[:8], _CYAN, _WHITE+model+_RESET,
-		_CYAN, _RESET,
-		_CYAN, _RESET))
-}
+// ── String/Output Methods ──────────────────────────────────────────────
 
 // String returns the debug output as a string.
 func (d *AIDebugger) String() string {
@@ -428,9 +786,22 @@ func (d *AIDebugger) String() string {
 // Reset clears the debug output.
 func (d *AIDebugger) Reset() {
 	d.output.Reset()
+	d.thinkBuffer.Reset()
+	d.events = d.events[:0]
+	d.contextPct = 0
+	d.contextUsed = 0
+	d.contextMax = 0
+	d.thinkStart = time.Time{}
+	d.respStart = time.Time{}
+	d.toolCount = 0
 }
 
-// Helper functions.
+// GetEvents returns the collected timeline events.
+func (d *AIDebugger) GetEvents() []TimelineEvent {
+	return d.events
+}
+
+// ── Helper Functions ──────────────────────────────────────────────
 
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
@@ -454,6 +825,8 @@ func max(a, b int) int {
 	}
 	return b
 }
+
+// ── Log Functions (for real-time debugging) ──────────────────────────────────────────
 
 // LogAuditEntry logs an audit entry to slog for real-time debugging.
 func LogAuditEntry(entry AuditEntry) {
@@ -489,18 +862,6 @@ func LogGhostCompact(sessionID string, beforeTokens, afterTokens int, err error)
 			"status", "success",
 		)
 	}
-}
-
-// LogCircuitBreakerDecision logs circuit breaker decisions in real-time.
-func LogCircuitBreakerDecision(sessionID string, errInfo circuit.ErrInfo, canRecover bool, retryCount int) {
-	slog.Info("circuit_breaker_decision",
-		"sid", sessionID,
-		"error_msg", errInfo.ErrMsg,
-		"recoverable", canRecover,
-		"strategy", StrategyName(errInfo.Strategy),
-		"delay", errInfo.Delay,
-		"retry_count", retryCount,
-	)
 }
 
 // LogTokenUsage logs token usage in real-time.

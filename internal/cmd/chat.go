@@ -32,26 +32,27 @@ Reads prompts from stdin or arguments and maintains a session for context.
 Press Ctrl+C or Ctrl+D to exit.`,
 	Example: `
 # Start interactive chat
-crush chat
+crusher chat
 
 # Start with AI debug mode (X-ray vision)
-crush chat --ai-debug
+crusher chat --ai-debug
 
 # Single prompt in chat mode
-crush chat "Hello, how are you?"
+crusher chat "Hello, how are you?"
 
 # Continue a previous session
-crush chat --session {session-id}
+crusher chat --session {session-id}
 
 # Continue the most recent session
-crush chat --continue
+crusher chat --continue
 
 # Pipe input to chat
-echo "Hello" | crush chat --ai-debug
+echo "Hello" | crusher chat --ai-debug
   `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var (
 			aiDebug, _   = cmd.Flags().GetBool("ai-debug")
+			verbosity, _  = cmd.Flags().GetString("verbosity")
 			sessionID, _  = cmd.Flags().GetString("session")
 			useLast, _    = cmd.Flags().GetBool("continue")
 		)
@@ -94,7 +95,7 @@ echo "Hello" | crush chat --ai-debug
 		// Create debugger if in AI debug mode
 		var debugger *agent.AIDebugger
 		if aiDebug {
-			debugger = agent.NewAIDebugger(agent.DefaultDebugConfig())
+			debugger = agent.NewAIDebugger(agent.DebugConfigFromVerbosity(verbosity))
 			agent.ClearAuditTrail()
 		}
 
@@ -199,6 +200,7 @@ echo "Hello" | crush chat --ai-debug
 
 func init() {
 	chatCmd.Flags().Bool("ai-debug", false, "AI Debug mode: full transparency, X-ray vision into all internal operations")
+	chatCmd.Flags().String("verbosity", "normal", "Verbosity level for ai-debug mode: minimal, normal, full, tokens")
 	chatCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	chatCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
 	chatCmd.MarkFlagsMutuallyExclusive("session", "continue")
@@ -226,10 +228,11 @@ func runChatPrompt(ctx context.Context, appInstance *app.App, sessionID, prompt 
 	thinkCallback := func(text string) {
 		if aiDebug && debugger != nil {
 			if !thinkStarted {
-				debugger.SubHeader("MODEL THINKING")
+				debugger.Header(fmt.Sprintf("Pensamientos [%s]", time.Now().Format("15:04:05")))
+				debugger.SetTypewriterMode(true)
 				thinkStarted = true
 			}
-			debugger.PrintThinkChunk(text)
+			debugger.PrintPensamientoChunk(text)
 			fmt.Fprint(os.Stderr, debugger.String())
 			debugger.Reset()
 		}
@@ -248,6 +251,7 @@ func runChatPrompt(ctx context.Context, appInstance *app.App, sessionID, prompt 
 	messageEvents := appInstance.Messages.Subscribe(ctx)
 	messageReadBytes := make(map[string]int)
 	toolCallCount := 0
+	respStarted := false // Track if we've already printed "Respuesta" header
 
 	for {
 		select {
@@ -314,6 +318,13 @@ func runChatPrompt(ctx context.Context, appInstance *app.App, sessionID, prompt 
 				part := content[readBytes:]
 				if readBytes == 0 {
 					part = strings.TrimLeft(part, " \t")
+					// Print Respuesta header only once per response cycle
+					if aiDebug && debugger != nil && !respStarted && strings.TrimSpace(part) != "" {
+						debugger.Header(fmt.Sprintf("Respuesta [%s]", time.Now().Format("15:04:05")))
+						fmt.Fprint(os.Stderr, debugger.String())
+						debugger.Reset()
+						respStarted = true
+					}
 				}
 
 				if strings.TrimSpace(part) != "" {
@@ -324,9 +335,12 @@ func runChatPrompt(ctx context.Context, appInstance *app.App, sessionID, prompt 
 				toolCallCount++
 				if aiDebug && debugger != nil {
 					for _, tr := range msg.ToolResults() {
-						debugger.SubHeader(fmt.Sprintf("TOOL [%d]: %s", toolCallCount, tr.Name))
 						if tr.IsError {
-							debugger.KV("Error", truncateString(tr.Content, 100))
+							debugger.SubHeader(fmt.Sprintf("TOOL ERROR [%d]: %s", toolCallCount, tr.Name))
+							debugger.KVError("Error", truncateString(tr.Content, 200))
+						} else {
+							debugger.SubHeader(fmt.Sprintf("TOOL [%d]: %s", toolCallCount, tr.Name))
+							debugger.KVSuccess("Completed", tr.Name)
 						}
 						fmt.Fprint(os.Stderr, debugger.String())
 						debugger.Reset()

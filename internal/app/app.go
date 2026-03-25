@@ -362,8 +362,8 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 // RunNonInteractiveDebug runs the application in non-interactive debug mode with full transparency.
 // This mode provides "X-ray vision" into all internal operations: audit trails, circuit breaker
 // decisions, ghost compact operations, token usage, and all internal state changes.
-func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, prompt, largeModel, smallModel string, continueSessionID string, useLast bool) error {
-	slog.Info("Running in AI DEBUG mode - full transparency enabled")
+func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, prompt, largeModel, smallModel, verbosity string, continueSessionID string, useLast bool) error {
+	slog.Info("Running in AI DEBUG mode - full transparency enabled", "verbosity", verbosity)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -383,8 +383,9 @@ func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, pr
 	// Force update of agent models before running so MCP tools are loaded
 	app.AgentCoordinator.UpdateModels(ctx)
 
-	// Create debugger
-	debugger := agent.NewAIDebugger(agent.DefaultDebugConfig())
+	// Create debugger with verbosity config
+	debugConfig := getDebugConfigFromVerbosity(verbosity)
+	debugger := agent.NewAIDebugger(debugConfig)
 	sessionID := continueSessionID
 
 	// Resolve or create session
@@ -438,8 +439,21 @@ func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, pr
 
 	startTime := time.Now()
 
+	// Think callback for streaming model reasoning
+	thinkStarted := false
+	thinkCallback := func(text string) {
+		if !thinkStarted {
+			debugger.Header(fmt.Sprintf("Pensamientos [%s]", time.Now().Format("15:04:05")))
+			debugger.SetTypewriterMode(true)
+			thinkStarted = true
+		}
+		debugger.PrintPensamientoChunk(text)
+		fmt.Fprint(os.Stderr, debugger.String())
+		debugger.Reset()
+	}
+
 	go func(ctx context.Context, sessionID, prompt string) {
-		result, err := app.AgentCoordinator.Run(ctx, sessionID, prompt, nil)
+		result, err := app.AgentCoordinator.Run(ctx, sessionID, prompt, thinkCallback)
 		if err != nil {
 			done <- response{err: fmt.Errorf("failed to start agent processing stream: %w", err)}
 			return
@@ -450,6 +464,7 @@ func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, pr
 	// Subscribe to message events for debug output
 	messageEvents := app.Messages.Subscribe(ctx)
 	messageReadBytes := make(map[string]int)
+	respStarted := false
 
 	// Main event loop
 	for {
@@ -521,6 +536,13 @@ func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, pr
 					part := content[readBytes:]
 					if readBytes == 0 {
 						part = strings.TrimLeft(part, " \t")
+						// Print Respuesta header only once
+						if !respStarted && strings.TrimSpace(part) != "" {
+							debugger.Header(fmt.Sprintf("Respuesta [%s]", time.Now().Format("15:04:05")))
+							fmt.Fprint(os.Stderr, debugger.String())
+							debugger.Reset()
+							respStarted = true
+						}
 					}
 
 					// Output to stdout (the actual response)
@@ -556,6 +578,20 @@ func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, pr
 			fmt.Fprintf(os.Stderr, "%s", debugger.String())
 			return ctx.Err()
 		}
+	}
+}
+
+// getDebugConfigFromVerbosity returns the appropriate DebugConfig based on verbosity string.
+func getDebugConfigFromVerbosity(verbosity string) agent.DebugConfig {
+	switch verbosity {
+	case "minimal":
+		return agent.MinimalDebugConfig()
+	case "full":
+		return agent.FullDebugConfig()
+	case "tokens":
+		return agent.TokensDebugConfig()
+	default: // "normal"
+		return agent.DefaultDebugConfig()
 	}
 }
 

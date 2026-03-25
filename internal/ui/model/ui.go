@@ -25,6 +25,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -147,6 +148,9 @@ type UI struct {
 	// continueLastSession is set to continue the most recent session on startup.
 	continueLastSession bool
 
+	// aiDebug enables AI debug mode with X-ray vision transparency.
+	aiDebug bool
+
 	lastUserMessageTime int64
 
 	// The width and height of the terminal in cells.
@@ -250,7 +254,7 @@ type UI struct {
 }
 
 // New creates a new instance of the [UI] model.
-func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
+func New(com *common.Common, initialSessionID string, continueLast bool, aiDebug bool) *UI {
 	// Editor components
 	ta := textarea.New()
 	ta.SetStyles(com.Styles.TextArea)
@@ -308,6 +312,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		notifyWindowFocused: true,
 		initialSessionID:    initialSessionID,
 		continueLastSession: continueLast,
+		aiDebug:            aiDebug,
 	}
 
 	status := NewStatus(com, ui)
@@ -2868,8 +2873,30 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	// Capture session ID to avoid race with main goroutine updating m.session.
 	sessionID := m.session.ID
+
+	// Set up think callback for AI debug mode
+	var thinkCallback agent.ThinkCallback
+	var debugger *agent.AIDebugger
+	if m.aiDebug {
+		debugger = agent.NewAIDebugger(agent.DefaultDebugConfig())
+		agent.ClearAuditTrail()
+		thinkStarted := false
+		thinkCallback = func(text string) {
+			if debugger != nil {
+				if !thinkStarted {
+					debugger.Header(fmt.Sprintf("Pensamientos [%s]", time.Now().Format("15:04:05")))
+					debugger.SetTypewriterMode(true)
+					thinkStarted = true
+				}
+				debugger.PrintPensamientoChunk(text)
+				fmt.Fprint(os.Stderr, debugger.String())
+				debugger.Reset()
+			}
+		}
+	}
+
 	cmds = append(cmds, func() tea.Msg {
-		_, err := m.com.App.AgentCoordinator.Run(context.Background(), sessionID, content, nil, attachments...)
+		_, err := m.com.App.AgentCoordinator.Run(context.Background(), sessionID, content, thinkCallback, attachments...)
 		if err != nil {
 			isCancelErr := errors.Is(err, context.Canceled)
 			isPermissionErr := errors.Is(err, permission.ErrorPermissionDenied)
@@ -2880,6 +2907,12 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 				Type: util.InfoTypeError,
 				Msg:  err.Error(),
 			}
+		}
+		// Print Respuesta header after successful completion
+		if m.aiDebug && debugger != nil {
+			debugger.Header(fmt.Sprintf("Respuesta [%s]", time.Now().Format("15:04:05")))
+			fmt.Fprint(os.Stderr, debugger.String())
+			debugger.Reset()
 		}
 		return nil
 	})
