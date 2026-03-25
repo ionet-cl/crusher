@@ -818,6 +818,9 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	if err != nil {
 		return fantasy.NewTextErrorResponse("error generating response"), nil
 	}
+	if result == nil || len(result.Response.Content) == 0 {
+		return fantasy.NewTextErrorResponse("empty response from agent"), nil
+	}
 
 	// Update parent session cost
 	if err := c.updateParentSessionCost(ctx, session.ID, params.SessionID); err != nil {

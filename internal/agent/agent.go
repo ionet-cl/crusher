@@ -31,7 +31,6 @@ import (
 	"charm.land/fantasy/providers/openrouter"
 	"charm.land/fantasy/providers/vercel"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/crush/internal/agent/circuit"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -129,6 +128,7 @@ type sessionAgent struct {
 
 	// CircuitBreaker auto-recovery (optional)
 	enableCircuitBreaker bool
+	recoveryManager      *RecoveryManager
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
@@ -185,6 +185,15 @@ func NewSessionAgent(
 
 	// Initialize CircuitBreaker if enabled
 	agent.enableCircuitBreaker = opts.EnableCircuitBreaker
+	if opts.EnableCircuitBreaker {
+		agent.recoveryManager = NewRecoveryManager(RecoveryManagerOptions{
+			EnableGhostCount:     opts.EnableGhostCount,
+			EnableCircuitBreaker: opts.EnableCircuitBreaker,
+			Messages:             opts.Messages,
+			Sessions:             opts.Sessions,
+			GhostCompact:         agent.GhostCompact,
+		})
+	}
 
 	return agent
 }
@@ -500,26 +509,47 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
 	if err != nil {
-		// Try to auto-recover if CircuitBreaker is enabled
-		if a.enableCircuitBreaker {
-			errInfo := circuit.Detect(err)
-			if errInfo.IsRecoverable && a.canRetry(call.SessionID) {
-				slog.Info("circuit breaker: recoverable error, attempting recovery",
-					"strategy", errInfo.Strategy,
-					"session", call.SessionID,
-					"error", errInfo.ErrMsg)
+		// Structured error logging for full audit trail
+		var provErr *fantasy.ProviderError
+		if errors.As(err, &provErr) {
+			LogProviderError(provErr, call.SessionID)
+			slog.Error("agent_run: provider error",
+				"sid", call.SessionID,
+				"error_type", "provider",
+				"title", provErr.Title,
+				"message", provErr.Message,
+				"status_code", provErr.StatusCode,
+				"context_too_large", provErr.IsContextTooLarge(),
+				"retryable", provErr.IsRetryable(),
+				"original_error", err)
+		} else {
+			slog.Error("agent_run: error",
+				"sid", call.SessionID,
+				"error_type", "generic",
+				"error", err)
+		}
 
-				recoveryErr := a.attemptRecovery(ctx, call, errInfo)
-				if recoveryErr == nil {
-					slog.Info("circuit breaker: recovery successful",
-						"session", call.SessionID)
-					// Recovery worked, don't return error
-					return result, nil
-				}
-				slog.Warn("circuit breaker: recovery failed",
-					"session", call.SessionID,
+		// Try to auto-recover if CircuitBreaker is enabled
+		if a.recoveryManager != nil {
+			slog.Info("agent_run: attempting circuit breaker recovery",
+				"sid", call.SessionID,
+				"error", err)
+			recovered, recoveryErr := a.recoveryManager.AttemptRecovery(ctx, call, err)
+			if recoveryErr == nil && recovered {
+				// Recovery succeeded - retry the operation
+				slog.Info("agent_run: recovery succeeded, retrying agent",
+					"sid", call.SessionID,
+					"recovery_attempts", circuitBreakerRetryCount[call.SessionID])
+				return a.Run(ctx, call)
+			}
+			if recoveryErr != nil {
+				slog.Error("agent_run: recovery failed",
+					"sid", call.SessionID,
 					"error", recoveryErr)
-				// Fall through to normal error handling
+			} else if !recovered {
+				slog.Warn("agent_run: error not recoverable",
+					"sid", call.SessionID,
+					"error", err)
 			}
 		}
 
@@ -654,7 +684,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// GhostCount compaction (non-blocking alternative to summarization)
 	if shouldCompact && a.enableGhostCount {
 		a.activeRequests.Del(call.SessionID)
-		if compactErr := a.GhostCompact(ctx, call.SessionID); compactErr != nil {
+		if compactErr := a.GhostCompact(ctx, call.SessionID, false); compactErr != nil {
 			// Log but don't fail - fallback to continuing
 			slog.Warn("ghost compact failed", "error", compactErr)
 		}
@@ -800,8 +830,11 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 // GhostCompact performs non-blocking context compaction using ghostcount.
 // It truncates/prunes old messages without generating a summary.
-func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string) error {
+// If forceCompact is true, compaction is attempted even if under normal threshold
+// (used when API reports context error).
+func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string, forceCompact bool) error {
 	if !a.enableGhostCount {
+		slog.Debug("ghost compact: not enabled")
 		return nil // GhostCount not enabled
 	}
 
@@ -815,8 +848,16 @@ func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string) error
 		return err
 	}
 	if len(msgs) == 0 {
+		slog.Debug("ghost compact: no messages")
 		return nil
 	}
+
+	slog.Info("ghost compact: starting",
+		"session", sessionID,
+		"message_count", len(msgs),
+		"config_history_threshold", a.ghostCountConfig.HistoryThreshold,
+		"context_window", a.ghostCountConfig.ContextWindow,
+		"force", forceCompact)
 
 	// Convert messages to ghostcount.Message interface
 	gcMessages := make([]ghostcount.Message, len(msgs))
@@ -824,36 +865,52 @@ func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string) error
 		gcMessages[i] = &messageAdapter{message: &msgs[i]}
 	}
 
-	// Run compaction
-	result := a.ghostCountCompactor.Compact(ctx, gcMessages, a.ghostCountConfig, a.ghostCountEstimator, a.ghostCountTruncator)
+	var result ghostcount.CompactionResult
+
+	if forceCompact {
+		// Force compaction with very aggressive budget (fixed 1500 tokens)
+		// This is used when API reports context error - we need to reduce significantly
+		aggressiveBudget := 1500
+		compactConfig := ghostcount.CompactionConfig{
+			ContextWindow:     a.ghostCountConfig.ContextWindow,
+			MaxResponseTokens: a.ghostCountConfig.MaxResponseTokens,
+			HistoryThreshold:  aggressiveBudget,
+		}
+		slog.Info("ghost compact: using aggressive budget", "budget", aggressiveBudget)
+		result = a.ghostCountCompactor.Compact(ctx, gcMessages, compactConfig, a.ghostCountEstimator, a.ghostCountTruncator)
+	} else {
+		// Normal compaction based on threshold
+		result = a.ghostCountCompactor.Compact(ctx, gcMessages, a.ghostCountConfig, a.ghostCountEstimator, a.ghostCountTruncator)
+	}
+
+	slog.Info("ghost compact: result",
+		"was_compacted", result.WasCompacted,
+		"tokens_before", result.TokensBefore,
+		"tokens_after", result.TokensAfter,
+		"async_recommended", result.AsyncRecommended,
+		"result_messages_count", len(result.Messages))
 
 	if !result.WasCompacted {
+		slog.Debug("ghost compact: no compaction needed")
 		return nil // No compaction needed
 	}
 
-	// Mark the compaction point - keep messages after the first compacted message
+	// Mark the compaction point - find first message that was actually kept
+	// Note: result.Messages may be reordered by HardPrune, so we can't use indices directly
 	if len(result.Messages) > 0 {
-		// Find the first message in the result that corresponds to the original messages
-		firstKeptIndex := -1
-		for i := range result.Messages {
-			if _, ok := result.Messages[i].(*messageAdapter); ok {
-				// This is the first kept message
-				firstKeptIndex = i
+		// Find the first message in the compacted result that was wrapped in messageAdapter
+		// The messageAdapter wraps the original message, so we need to get its ID
+		for _, msg := range result.Messages {
+			if adapter, ok := msg.(*messageAdapter); ok {
+				// Found the first kept message - use its ID as the compaction boundary
+				currentSession.SummaryMessageID = adapter.message.ID
+				currentSession.CompletionTokens = 0
+				currentSession.PromptTokens = 0
+				_, err = a.sessions.Save(ctx, currentSession)
+				if err != nil {
+					return err
+				}
 				break
-			}
-		}
-
-		if firstKeptIndex > 0 && firstKeptIndex < len(msgs) {
-			// Mark that messages before this index are compacted away
-			// We do this by setting SummaryMessageID to indicate compaction happened
-			// The getSessionMessages will then filter appropriately
-			compactedMsg := msgs[firstKeptIndex]
-			currentSession.SummaryMessageID = compactedMsg.ID
-			currentSession.CompletionTokens = 0
-			currentSession.PromptTokens = 0
-			_, err = a.sessions.Save(ctx, currentSession)
-			if err != nil {
-				return err
 			}
 		}
 	}
@@ -864,99 +921,6 @@ func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string) error
 		"async_recommended", result.AsyncRecommended)
 
 	return nil
-}
-
-const maxCircuitBreakerRetries = 2
-
-// circuitBreakerRetryCount tracks retry attempts per session.
-var circuitBreakerRetryCount = make(map[string]int)
-
-// canRetry checks if we have retries remaining for this session.
-func (a *sessionAgent) canRetry(sessionID string) bool {
-	count := circuitBreakerRetryCount[sessionID]
-	if count >= maxCircuitBreakerRetries {
-		return false
-	}
-	circuitBreakerRetryCount[sessionID] = count + 1
-	return true
-}
-
-// attemptRecovery tries to recover from an error based on the strategy.
-func (a *sessionAgent) attemptRecovery(ctx context.Context, call SessionAgentCall, errInfo circuit.ErrInfo) error {
-	recoveryErr := errors.New(errInfo.ErrMsg)
-
-	switch errInfo.Strategy {
-	case circuit.StrategyGhostCompact:
-		// Compact context and retry
-		if a.enableGhostCount {
-			if compactErr := a.GhostCompact(ctx, call.SessionID); compactErr != nil {
-				slog.Warn("circuit breaker: GhostCompact failed during recovery", "error", compactErr)
-			}
-		}
-		// Inject recovery message
-		recoveryMsg := circuit.BuildRecoveryMessage(recoveryErr)
-		_, createErr := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
-			Role:  message.User,
-			Parts: []message.ContentPart{message.TextContent{Text: recoveryMsg}},
-		})
-		if createErr != nil {
-			return createErr
-		}
-		// Retry the run
-		result, runErr := a.Run(ctx, call)
-		if runErr != nil {
-			return runErr
-		}
-		_ = result // success
-		return nil
-
-	case circuit.StrategyWaitAndRetry:
-		// Wait for the specified delay
-		if errInfo.Delay > 0 {
-			slog.Info("circuit breaker: waiting before retry", "delay", errInfo.Delay)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(errInfo.Delay):
-			}
-		}
-		// Inject recovery message and retry
-		recoveryMsg := circuit.BuildRecoveryMessage(recoveryErr)
-		_, createErr := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
-			Role:  message.User,
-			Parts: []message.ContentPart{message.TextContent{Text: recoveryMsg}},
-		})
-		if createErr != nil {
-			return createErr
-		}
-		result, runErr := a.Run(ctx, call)
-		if runErr != nil {
-			return runErr
-		}
-		_ = result // success
-		return nil
-
-	case circuit.StrategyCleanAndRetry:
-		// Clean corrupted messages and retry
-		// For now, just inject recovery message
-		recoveryMsg := circuit.BuildRecoveryMessage(recoveryErr)
-		_, createErr := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
-			Role:  message.User,
-			Parts: []message.ContentPart{message.TextContent{Text: recoveryMsg}},
-		})
-		if createErr != nil {
-			return createErr
-		}
-		result, runErr := a.Run(ctx, call)
-		if runErr != nil {
-			return runErr
-		}
-		_ = result // success
-		return nil
-
-	default:
-		return fmt.Errorf("circuit breaker: unknown strategy %d", errInfo.Strategy)
-	}
 }
 
 // messageAdapter wraps a crush message.Message to implement ghostcount.Message.

@@ -5,26 +5,25 @@ type StopReason int
 
 const (
 	StopReasonNone StopReason = iota
-	StopReasonContextLimit // Context window near limit
-	StopReasonLoopDetected // Repetitive tool calls detected
-	StopReasonManual       // User cancelled
+	StopReasonContextLimit
+	StopReasonLoopDetected
+	StopReasonManual
 )
 
 // StopCondition evaluates whether agent should stop.
 type StopCondition struct {
 	ShouldStop bool
-	Reason     StopReason
+	Reason    StopReason
 }
 
 // ContextConfig holds threshold configuration for context management.
 type ContextConfig struct {
-	// Token thresholds
-	LargeContextThreshold int64 // Models > this use buffer-based threshold
-	LargeContextBuffer   int64 // Reserved tokens for large models
-	SmallContextRatio    float64 // Reserved ratio for small models
+	LargeContextThreshold int64
+	LargeContextBuffer   int64
+	SmallContextRatio    float64
 }
 
-// DefaultContextConfig returns sensible defaults matching existing constants.
+// DefaultContextConfig returns sensible defaults.
 func DefaultContextConfig() ContextConfig {
 	return ContextConfig{
 		LargeContextThreshold: largeContextWindowThreshold,
@@ -38,22 +37,14 @@ type ContextManager struct {
 	config ContextConfig
 }
 
-// NewContextManager creates a ContextManager with default config.
+// NewContextManager creates a ContextManager.
 func NewContextManager() *ContextManager {
-	return &ContextManager{
-		config: DefaultContextConfig(),
-	}
+	return &ContextManager{config: DefaultContextConfig()}
 }
 
 // ShouldStop evaluates context window against token usage.
-// Returns StopCondition indicating if agent should stop.
-func (cm *ContextManager) ShouldStop(
-	ctxWindow int64,
-	promptTokens int64,
-	completionTokens int64,
-) StopCondition {
-	tokens := promptTokens + completionTokens
-	remaining := ctxWindow - tokens
+func (cm *ContextManager) ShouldStop(ctxWindow, promptTokens, completionTokens int64) StopCondition {
+	remaining := ctxWindow - (promptTokens + completionTokens)
 
 	var threshold int64
 	if ctxWindow > cm.config.LargeContextThreshold {
@@ -63,14 +54,7 @@ func (cm *ContextManager) ShouldStop(
 	}
 
 	if remaining <= threshold {
-		return StopCondition{
-			ShouldStop: true,
-			Reason:     StopReasonContextLimit,
-		}
+		return StopCondition{ShouldStop: true, Reason: StopReasonContextLimit}
 	}
-
-	return StopCondition{
-		ShouldStop: false,
-		Reason:     StopReasonNone,
-	}
+	return StopCondition{ShouldStop: false, Reason: StopReasonNone}
 }
