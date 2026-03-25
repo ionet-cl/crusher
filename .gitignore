@@ -51,3 +51,11 @@ manpages/
 completions/crush.*sh
 .prettierignore
 .task
+
+# Local binaries
+crush-main-bin
+crush-test
+crusher
+
+# Local directories
+.serena/
