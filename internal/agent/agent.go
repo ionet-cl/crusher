@@ -69,6 +69,10 @@ var summaryPrompt []byte
 // Used to remove <think> tags from generated titles.
 var thinkTagRegex = regexp.MustCompile(`<think>.*?</think>`)
 
+// ThinkCallback is called with think/reasoning content as it's generated.
+type ThinkCallback func(text string)
+
+// SessionAgentCall represents a single call to the agent.
 type SessionAgentCall struct {
 	SessionID        string
 	Prompt           string
@@ -81,6 +85,7 @@ type SessionAgentCall struct {
 	FrequencyPenalty *float64
 	PresencePenalty  *float64
 	NonInteractive   bool
+	ThinkCallback    ThinkCallback // Optional callback for streaming think content
 }
 
 type SessionAgent interface {
@@ -368,6 +373,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		},
 		OnReasoningDelta: func(id string, text string) error {
 			currentAssistant.AppendReasoningContent(text)
+			// Stream think content to debug callback if set
+			if call.ThinkCallback != nil {
+				call.ThinkCallback(text)
+			}
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {

@@ -218,8 +218,18 @@ func runChatPrompt(ctx context.Context, appInstance *app.App, sessionID, prompt 
 
 	startTime := time.Now()
 
+	// Think callback for streaming model reasoning
+	thinkCallback := func(text string) {
+		if aiDebug && debugger != nil {
+			debugger.SubHeader("THINK")
+			debugger.KV("Reasoning", text)
+			fmt.Fprint(os.Stderr, debugger.String())
+			debugger.Reset()
+		}
+	}
+
 	go func() {
-		result, err := appInstance.AgentCoordinator.Run(ctx, sessionID, prompt)
+		result, err := appInstance.AgentCoordinator.Run(ctx, sessionID, prompt, thinkCallback)
 		if err != nil {
 			done <- response{err: fmt.Errorf("agent failed: %w", err)}
 			return
