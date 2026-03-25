@@ -36,6 +36,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/ghostcount"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -49,10 +50,12 @@ import (
 const (
 	DefaultSessionName = "Untitled Session"
 
-	// Constants for auto-summarization thresholds
-	largeContextWindowThreshold = 200_000
-	largeContextWindowBuffer    = 20_000
-	smallContextWindowRatio     = 0.2
+	// Auto-summarization thresholds:
+	// - Models > 200K context: use fixed 20K buffer
+	// - Models <= 200K context: use 20% of context as buffer
+	largeContextWindowThreshold = 200_000 // Tokens; above this use buffer-based threshold
+	largeContextWindowBuffer   = 20_000  // Fixed 20K tokens reserved for large models
+	smallContextWindowRatio    = 0.2     // 20% of context reserved for small models
 )
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
@@ -116,28 +119,38 @@ type sessionAgent struct {
 	isYolo               bool
 	notify               pubsub.Publisher[notify.Notification]
 
+	// GhostCount context management (optional)
+	enableGhostCount    bool
+	ghostCountEstimator ghostcount.TokenEstimator
+	ghostCountConfig    ghostcount.CompactionConfig
+	ghostCountTruncator ghostcount.ContextTruncator
+	ghostCountCompactor ghostcount.MessageCompactor
+
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
 }
 
 type SessionAgentOptions struct {
-	LargeModel           Model
-	SmallModel           Model
-	SystemPromptPrefix   string
-	SystemPrompt         string
-	IsSubAgent           bool
-	DisableAutoSummarize bool
-	IsYolo               bool
-	Sessions             session.Service
-	Messages             message.Service
-	Tools                []fantasy.AgentTool
-	Notify               pubsub.Publisher[notify.Notification]
+	LargeModel            Model
+	SmallModel            Model
+	SystemPromptPrefix    string
+	SystemPrompt          string
+	IsSubAgent            bool
+	DisableAutoSummarize  bool
+	EnableGhostCount      bool
+	IsYolo                bool
+	Sessions              session.Service
+	Messages              message.Service
+	Tools                 []fantasy.AgentTool
+	Notify                pubsub.Publisher[notify.Notification]
+	GhostCountEstimator   ghostcount.TokenEstimator
+	GhostCountConfig      ghostcount.CompactionConfig
 }
 
 func NewSessionAgent(
 	opts SessionAgentOptions,
 ) SessionAgent {
-	return &sessionAgent{
+	agent := &sessionAgent{
 		largeModel:           csync.NewValue(opts.LargeModel),
 		smallModel:           csync.NewValue(opts.SmallModel),
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
@@ -152,6 +165,20 @@ func NewSessionAgent(
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
 	}
+
+	// Initialize GhostCount if enabled
+	if opts.EnableGhostCount {
+		agent.enableGhostCount = true
+		agent.ghostCountEstimator = opts.GhostCountEstimator
+		if agent.ghostCountEstimator == nil {
+			agent.ghostCountEstimator = ghostcount.NewEstimator()
+		}
+		agent.ghostCountConfig = opts.GhostCountConfig
+		agent.ghostCountTruncator = ghostcount.NewTruncator()
+		agent.ghostCountCompactor = ghostcount.NewCompactor()
+	}
+
+	return agent
 }
 
 func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -249,6 +276,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	var currentAssistant *message.Message
 	var shouldSummarize bool
+	var shouldCompact bool
 	result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 		Files:            files,
@@ -427,6 +455,28 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				} else {
 					threshold = int64(float64(cw) * smallContextWindowRatio)
 				}
+
+				// Use ghostcount for smarter context management if enabled
+				if a.enableGhostCount && a.ghostCountEstimator != nil {
+					msgs, err := a.getSessionMessages(ctx, currentSession)
+					if err == nil && len(msgs) > 0 {
+						// Convert messages to strings for ghostcount
+						texts := make([]string, len(msgs))
+						for i, m := range msgs {
+							texts[i] = fmt.Sprintf("%s: %s", m.Role, m.Content().Text)
+						}
+						ghostTokens := a.ghostCountEstimator.EstimateMessages(texts)
+						// Use ghost tokens for remaining calculation
+						ghostRemaining := cw - int64(ghostTokens)
+						if ghostRemaining <= int64(a.ghostCountConfig.HistoryThreshold) {
+							shouldCompact = true
+							return true
+						}
+						return false
+					}
+				}
+
+				// Fallback to original token counting
 				if (remaining <= threshold) && !a.disableAutoSummarize {
 					shouldSummarize = true
 					return true
@@ -570,6 +620,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}
 
+	// GhostCount compaction (non-blocking alternative to summarization)
+	if shouldCompact && a.enableGhostCount {
+		a.activeRequests.Del(call.SessionID)
+		if compactErr := a.GhostCompact(ctx, call.SessionID); compactErr != nil {
+			// Log but don't fail - fallback to continuing
+			slog.Warn("ghost compact failed", "error", compactErr)
+		}
+		// If the agent wasn't done, re-queue
+		if len(currentAssistant.ToolCalls()) > 0 {
+			existing, ok := a.messageQueue.Get(call.SessionID)
+			if !ok {
+				existing = []SessionAgentCall{}
+			}
+			call.Prompt = fmt.Sprintf("The previous session was interrupted due to context limits, the initial user request was: `%s`", call.Prompt)
+			existing = append(existing, call)
+			a.messageQueue.Set(call.SessionID, existing)
+		}
+	}
+
 	// Release active request before processing queued messages.
 	a.activeRequests.Del(call.SessionID)
 	cancel()
@@ -696,6 +765,87 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	currentSession.PromptTokens = 0
 	_, err = a.sessions.Save(genCtx, currentSession)
 	return err
+}
+
+// GhostCompact performs non-blocking context compaction using ghostcount.
+// It truncates/prunes old messages without generating a summary.
+func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string) error {
+	if !a.enableGhostCount {
+		return nil // GhostCount not enabled
+	}
+
+	currentSession, err := a.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get session: %w", err)
+	}
+
+	msgs, err := a.messages.List(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	// Convert messages to ghostcount.Message interface
+	gcMessages := make([]ghostcount.Message, len(msgs))
+	for i := range msgs {
+		gcMessages[i] = &messageAdapter{message: &msgs[i]}
+	}
+
+	// Run compaction
+	result := a.ghostCountCompactor.Compact(ctx, gcMessages, a.ghostCountConfig, a.ghostCountEstimator, a.ghostCountTruncator)
+
+	if !result.WasCompacted {
+		return nil // No compaction needed
+	}
+
+	// Mark the compaction point - keep messages after the first compacted message
+	if len(result.Messages) > 0 {
+		// Find the first message in the result that corresponds to the original messages
+		firstKeptIndex := -1
+		for i := range result.Messages {
+			if _, ok := result.Messages[i].(*messageAdapter); ok {
+				// This is the first kept message
+				firstKeptIndex = i
+				break
+			}
+		}
+
+		if firstKeptIndex > 0 && firstKeptIndex < len(msgs) {
+			// Mark that messages before this index are compacted away
+			// We do this by setting SummaryMessageID to indicate compaction happened
+			// The getSessionMessages will then filter appropriately
+			compactedMsg := msgs[firstKeptIndex]
+			currentSession.SummaryMessageID = compactedMsg.ID
+			currentSession.CompletionTokens = 0
+			currentSession.PromptTokens = 0
+			_, err = a.sessions.Save(ctx, currentSession)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	slog.Info("ghost compact completed",
+		"tokens_before", result.TokensBefore,
+		"tokens_after", result.TokensAfter,
+		"async_recommended", result.AsyncRecommended)
+
+	return nil
+}
+
+// messageAdapter wraps a crush message.Message to implement ghostcount.Message.
+type messageAdapter struct {
+	message *message.Message
+}
+
+func (m *messageAdapter) GetRole() string {
+	return string(m.message.Role)
+}
+
+func (m *messageAdapter) GetContent() string {
+	return m.message.Content().Text
 }
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {
