@@ -327,6 +327,81 @@ using `$(echo $VAR)` syntax.
 }
 ```
 
+### Popular MCP Server Examples
+
+Here are examples of popular MCP servers you can configure:
+
+#### Tavily (Web Search)
+
+```json
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "tavily": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "tavily-mcp-server"],
+      "env": {
+        "TAVILY_API_KEY": "$TAVILY_API_KEY"
+      }
+    }
+  }
+}
+```
+
+#### Context7 (Documentation Search)
+
+```json
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@context7/mcp-server"]
+    }
+  }
+}
+```
+
+#### GitHub
+
+```json
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer $GH_PAT"
+      }
+    }
+  }
+}
+```
+
+#### Filesystem (Local File Access)
+
+```json
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"]
+    }
+  }
+}
+```
+
+> [!NOTE]
+> MCP servers require the respective packages to be installed. Most can be run via `npx` without manual installation. For production use, consider installing packages globally:
+> ```bash
+> npm install -g tavily-mcp-server @context7/mcp-server @modelcontextprotocol/server-filesystem
+> ```
+
 ### Ignoring Files
 
 Crush respects `.gitignore` files by default, but you can also create a
