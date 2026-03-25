@@ -112,18 +112,21 @@ echo "Hello" | crush chat --ai-debug
 			welcomeMu.Unlock()
 
 			if aiDebug && debugger != nil {
-				debugger.Header("CHAT SESSION START (AI DEBUG MODE)")
-				debugger.KV("SessionID", sessionID)
-				debugger.KV("Mode", "X-RAY VISION")
 				model := appInstance.AgentCoordinator.Model()
+				modelName := "unknown"
 				if model.Model != nil {
-					debugger.KV("Model", model.ModelCfg.Model)
+					modelName = model.ModelCfg.Model
+				}
+				debugger.PrintBanner(sessionID, modelName)
+				cfg := appInstance.Config()
+				debugger.SubHeader("SESSION CONFIG")
+				debugger.KV("Mode", "\033[38;5;75m"+"X-RAY VISION"+"\033[0m")
+				debugger.KV("CircuitBreaker", cfg.Options.EnableCircuitBreaker)
+				debugger.KV("GhostCount", cfg.Options.EnableGhostCount)
+				if model.Model != nil {
 					debugger.KV("Provider", model.ModelCfg.Provider)
 					debugger.KV("ContextWindow", model.CatwalkCfg.ContextWindow)
 				}
-				cfg := appInstance.Config()
-				debugger.KV("CircuitBreakerEnabled", cfg.Options.EnableCircuitBreaker)
-				debugger.KV("GhostCountEnabled", cfg.Options.EnableGhostCount)
 				debugger.KV("Exit", "Ctrl+C or Ctrl+D")
 				fmt.Fprint(os.Stderr, debugger.String())
 				debugger.Reset()
@@ -219,10 +222,14 @@ func runChatPrompt(ctx context.Context, appInstance *app.App, sessionID, prompt 
 	startTime := time.Now()
 
 	// Think callback for streaming model reasoning
+	thinkStarted := false
 	thinkCallback := func(text string) {
 		if aiDebug && debugger != nil {
-			debugger.SubHeader("THINK")
-			debugger.KV("Reasoning", text)
+			if !thinkStarted {
+				debugger.SubHeader("MODEL THINKING")
+				thinkStarted = true
+			}
+			debugger.PrintThinkChunk(text)
 			fmt.Fprint(os.Stderr, debugger.String())
 			debugger.Reset()
 		}
