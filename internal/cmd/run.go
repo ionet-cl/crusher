@@ -120,7 +120,7 @@ func init() {
 	runCmd.Flags().BoolP("quiet", "q", false, "Hide spinner")
 	runCmd.Flags().BoolP("verbose", "v", false, "Show logs")
 	runCmd.Flags().Bool("ai-debug", false, "AI Debug mode: pure CLI with full transparency, X-ray vision into all internal operations")
-	runCmd.Flags().String("verbosity", "normal", "Verbosity level for ai-debug mode: minimal, normal, full, tokens")
+	runCmd.Flags().String("verbosity", "normal", "Verbosity level for ai-debug mode: minimal, normal, full, tokens, raw")
 	runCmd.Flags().StringP("model", "m", "", "Model to use. Accepts 'model' or 'provider/model' to disambiguate models with the same name across providers")
 	runCmd.Flags().String("small-model", "", "Small model to use. If not provided, uses the default small model for the provider")
 	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")

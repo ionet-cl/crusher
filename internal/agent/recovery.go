@@ -19,6 +19,11 @@ const maxCircuitBreakerRetries = 2
 // circuitBreakerRetryCount tracks retry attempts per session.
 var circuitBreakerRetryCount = make(map[string]int)
 
+// MaxCircuitBreakerRetries returns the maximum number of retry attempts allowed.
+func MaxCircuitBreakerRetries() int {
+	return maxCircuitBreakerRetries
+}
+
 // AuditEntry represents a single recovery action for audit trail.
 type AuditEntry struct {
 	SessionID    string
@@ -128,7 +133,7 @@ func (rm *RecoveryManager) AttemptRecovery(ctx context.Context, call SessionAgen
 	slog.Info("circuit_breaker: attempting recovery",
 		"sid", call.SessionID,
 		"strategy", errInfo.Strategy,
-		"strategy_name", StrategyName(errInfo.Strategy),
+		"strategy_name", GetStrategyName(errInfo.Strategy),
 		"error", errInfo.ErrMsg,
 		"delay", errInfo.Delay)
 
@@ -159,7 +164,7 @@ func (rm *RecoveryManager) AttemptRecovery(ctx context.Context, call SessionAgen
 			"error", recoveryErr)
 	} else {
 		entry.Success = true
-		entry.Details = fmt.Sprintf("recovery action completed, strategy: %s", StrategyName(errInfo.Strategy))
+		entry.Details = fmt.Sprintf("recovery action completed, strategy: %s", GetStrategyName(errInfo.Strategy))
 		slog.Info("circuit_breaker: recovery completed",
 			"sid", call.SessionID,
 			"strategy", entry.Action,
@@ -171,7 +176,7 @@ func (rm *RecoveryManager) AttemptRecovery(ctx context.Context, call SessionAgen
 }
 
 // StrategyName returns a human-readable name for a circuit.Strategy.
-func StrategyName(s circuit.Strategy) string {
+func GetStrategyName(s circuit.Strategy) string {
 	switch s {
 	case circuit.StrategyGhostCompact:
 		return "ghost_compact"

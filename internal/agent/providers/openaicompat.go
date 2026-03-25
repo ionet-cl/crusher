@@ -13,18 +13,17 @@ import (
 // openaicompatBuilder implements Builder for OpenAI Compatible providers.
 type openaicompatBuilder struct{}
 
-func (b *openaicompatBuilder) Build(ctx context.Context, cfg ProviderConfig, debug bool) (fantasy.Provider, error) {
+func (b *openaicompatBuilder) Build(ctx context.Context, cfg ProviderConfig) (fantasy.Provider, error) {
 	opts := []openaicompat.Option{
 		openaicompat.WithBaseURL(cfg.BaseURL),
 		openaicompat.WithAPIKey(cfg.APIKey),
 	}
 
-	// Set HTTP client based on provider and debug mode.
 	var httpClient *http.Client
 	if cfg.ID == "copilot" {
 		opts = append(opts, openaicompat.WithUseResponsesAPI())
 		httpClient = log.NewHTTPClient()
-	} else if debug {
+	} else if cfg.Debug {
 		httpClient = log.NewHTTPClient()
 	}
 	if httpClient != nil {

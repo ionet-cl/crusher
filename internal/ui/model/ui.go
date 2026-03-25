@@ -35,6 +35,7 @@ import (
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/home"
+	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -2878,6 +2879,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	var thinkCallback agent.ThinkCallback
 	var debugger *agent.AIDebugger
 	if m.aiDebug {
+		log.SetAIDebug(true)
 		debugger = agent.NewAIDebugger(agent.DefaultDebugConfig())
 		agent.ClearAuditTrail()
 		thinkStarted := false

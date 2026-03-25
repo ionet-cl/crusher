@@ -51,6 +51,7 @@ const (
 	VerbosityNormal                        // + Tool calls
 	VerbosityFull                          // Everything including audit trail
 	VerbosityTokens                        // Only context bar
+	VerbosityRaw                           // Extreme debugging: unredacted, everything visible
 )
 
 func (v VerbosityLevel) String() string {
@@ -63,12 +64,14 @@ func (v VerbosityLevel) String() string {
 		return "full"
 	case VerbosityTokens:
 		return "tokens"
+	case VerbosityRaw:
+		return "raw"
 	default:
 		return "unknown"
 	}
 }
 
-// ParseVerbosity parses a verbosity string like "minimal", "normal", "full", "tokens".
+// ParseVerbosity parses a verbosity string like "minimal", "normal", "full", "tokens", "raw".
 func ParseVerbosity(s string) VerbosityLevel {
 	switch strings.ToLower(s) {
 	case "minimal":
@@ -79,6 +82,8 @@ func ParseVerbosity(s string) VerbosityLevel {
 		return VerbosityFull
 	case "tokens":
 		return VerbosityTokens
+	case "raw":
+		return VerbosityRaw
 	default:
 		return VerbosityNormal
 	}
@@ -88,16 +93,17 @@ func ParseVerbosity(s string) VerbosityLevel {
 
 // DebugConfig holds configuration for debug output.
 type DebugConfig struct {
-	Verbosity        VerbosityLevel
-	ShowPensamientos  bool
-	ShowRespuesta    bool
-	ShowToolCalls    bool
-	ShowContextBar   bool
-	ShowTimeline     bool
-	ShowAuditTrail   bool
-	ShowGhostCompact bool
-	ShowTokenUsage   bool
-	ShowState       bool
+	Verbosity         VerbosityLevel
+	ShowPensamientos   bool
+	ShowRespuesta     bool
+	ShowToolCalls     bool
+	ShowContextBar    bool
+	ShowTimeline      bool
+	ShowAuditTrail    bool
+	ShowGhostCompact  bool
+	ShowTokenUsage    bool
+	ShowState         bool
+	RawMode           bool // When true, show unredacted headers and full details
 }
 
 // DefaultDebugConfig returns a config with all debug features enabled.
@@ -173,9 +179,19 @@ func DebugConfigFromVerbosity(verbosity string) DebugConfig {
 		return FullDebugConfig()
 	case "tokens":
 		return TokensDebugConfig()
+	case "raw":
+		return RawDebugConfig()
 	default: // "normal"
 		return DefaultDebugConfig()
 	}
+}
+
+// RawDebugConfig returns a config with absolutely everything enabled plus unredacted output.
+func RawDebugConfig() DebugConfig {
+	cfg := FullDebugConfig()
+	cfg.Verbosity = VerbosityRaw
+	cfg.RawMode = true
+	return cfg
 }
 
 // ── Timeline Event ──────────────────────────────────────────────
@@ -654,7 +670,7 @@ func (d *AIDebugger) PrintAuditEntry(entry AuditEntry) {
 	d.KV("SessionID", entry.SessionID)
 	d.KV("Timestamp", entry.Timestamp.Format("15:04:05.000"))
 	d.KV("Action", entry.Action)
-	d.KV("Strategy", StrategyName(entry.Strategy))
+	d.KV("Strategy", GetStrategyName(entry.Strategy))
 	d.KV("Error", truncateString(entry.Error, 60))
 	d.KV("Details", truncateString(entry.Details, 80))
 }
@@ -689,7 +705,7 @@ func (d *AIDebugger) PrintAllAuditTrail(entries []AuditEntry) {
 			_CYAN, i+1, _RESET,
 			entry.Timestamp.Format("15:04:05"),
 			truncateString(entry.Action, 17),
-			truncateString(StrategyName(entry.Strategy), 10),
+			truncateString(GetStrategyName(entry.Strategy), 10),
 			statusColor+statusStr+_RESET))
 	}
 }
@@ -834,7 +850,7 @@ func LogAuditEntry(entry AuditEntry) {
 		"sid", entry.SessionID,
 		"timestamp", entry.Timestamp.Format(time.RFC3339Nano),
 		"action", entry.Action,
-		"strategy", StrategyName(entry.Strategy),
+		"strategy", GetStrategyName(entry.Strategy),
 		"error", entry.Error,
 		"success", entry.Success,
 		"details", entry.Details,
@@ -880,4 +896,51 @@ func LogTokenUsage(sessionID string, promptTokens, completionTokens, totalTokens
 // GetCircuitBreakerRetryCount returns the current retry count for a session.
 func GetCircuitBreakerRetryCount(sessionID string) int {
 	return circuitBreakerRetryCount[sessionID]
+}
+
+// CircuitBreakerState holds the current state of the circuit breaker for display.
+type CircuitBreakerState struct {
+	Enabled    bool
+	Retries    int
+	MaxRetries int
+}
+
+// GetCircuitBreakerState returns the current circuit breaker state for a session.
+func GetCircuitBreakerState(sessionID string, enabled bool) CircuitBreakerState {
+	return CircuitBreakerState{
+		Enabled:    enabled,
+		Retries:    GetCircuitBreakerRetryCount(sessionID),
+		MaxRetries: MaxCircuitBreakerRetries(),
+	}
+}
+
+// PrintCircuitBreakerState prints the circuit breaker state in debug output.
+func (d *AIDebugger) PrintCircuitBreakerState(state CircuitBreakerState) {
+	if !d.config.ShowState {
+		return
+	}
+	d.Header("CIRCUIT BREAKER STATE")
+	d.KV("Enabled", state.Enabled)
+	if state.Enabled {
+		remaining := state.MaxRetries - state.Retries
+		statusColor := _GREEN
+		if remaining <= 0 {
+			statusColor = _RED
+		} else if remaining == 1 {
+			statusColor = _YELLOW
+		}
+		d.output.WriteString(fmt.Sprintf("  %s %-28s %s%d / %d%s\n",
+			_ICON_INFO,
+			_GRAY+"Retries:"+_RESET,
+			statusColor,
+			state.Retries,
+			state.MaxRetries,
+			_RESET))
+		d.output.WriteString(fmt.Sprintf("  %s %-28s %s%d remaining%s\n",
+			_ICON_INFO,
+			_GRAY+"Remaining:"+_RESET,
+			statusColor,
+			remaining,
+			_RESET))
+	}
 }

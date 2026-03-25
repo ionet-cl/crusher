@@ -11,13 +11,13 @@ import (
 // openAIBuilder implements Builder for OpenAI.
 type openAIBuilder struct{}
 
-func (b *openAIBuilder) Build(ctx context.Context, cfg ProviderConfig, debug bool) (fantasy.Provider, error) {
+func (b *openAIBuilder) Build(ctx context.Context, cfg ProviderConfig) (fantasy.Provider, error) {
 	opts := []openai.Option{
 		openai.WithAPIKey(cfg.APIKey),
 		openai.WithUseResponsesAPI(),
 	}
 
-	if debug {
+	if cfg.Debug {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, openai.WithHTTPClient(httpClient))
 	}
@@ -31,9 +31,4 @@ func (b *openAIBuilder) Build(ctx context.Context, cfg ProviderConfig, debug boo
 	}
 
 	return openai.New(opts...)
-}
-
-func (f *Factory) buildOpenAI(cfg ProviderConfig, debug bool) (fantasy.Provider, error) {
-	builder := &openAIBuilder{}
-	return builder.Build(context.Background(), cfg, debug)
 }

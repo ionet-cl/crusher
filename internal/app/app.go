@@ -363,6 +363,12 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 // This mode provides "X-ray vision" into all internal operations: audit trails, circuit breaker
 // decisions, ghost compact operations, token usage, and all internal state changes.
 func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, prompt, largeModel, smallModel, verbosity string, continueSessionID string, useLast bool) error {
+	log.SetAIDebug(true)
+	defer log.SetAIDebug(false)
+	if verbosity == "raw" {
+		log.SetRawMode(true)
+		defer log.SetRawMode(false)
+	}
 	slog.Info("Running in AI DEBUG mode - full transparency enabled", "verbosity", verbosity)
 
 	ctx, cancel := context.WithCancel(ctx)

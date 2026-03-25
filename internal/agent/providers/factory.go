@@ -34,6 +34,7 @@ type ProviderConfig struct {
 	ExtraBody   map[string]any
 	ExtraParams map[string]string
 	IsSubAgent  bool
+	Debug       bool
 }
 
 // ErrUnsupportedProvider is returned when the provider type is not supported.
@@ -47,17 +48,17 @@ func (e *unsupportedProviderError) Error() string {
 
 // Build routes to the appropriate builder based on provider type.
 func (f *Factory) Build(ctx context.Context, cfg ProviderConfig) (fantasy.Provider, error) {
-	debug := f.config.Config().Options.Debug
+	cfg.Debug = f.config.Config().Options.Debug || log.AIDebugEnabled.Load()
 
 	switch cfg.Type {
 	case "openai":
-		return (&openAIBuilder{}).Build(ctx, cfg, debug)
+		return (&openAIBuilder{}).Build(ctx, cfg)
 	case "anthropic":
-		return (&anthropicBuilder{}).Build(ctx, cfg, debug)
+		return (&anthropicBuilder{}).Build(ctx, cfg)
 	case "openrouter":
-		return (&openrouterBuilder{}).Build(ctx, cfg, debug)
+		return (&openrouterBuilder{}).Build(ctx, cfg)
 	case "openaicompat", "openai-compat":
-		return (&openaicompatBuilder{}).Build(ctx, cfg, debug)
+		return (&openaicompatBuilder{}).Build(ctx, cfg)
 	default:
 		return nil, fmt.Errorf("%w: %s (supported: openai, anthropic, openrouter, openaicompat)", ErrUnsupportedProvider, cfg.Type)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/event"
+	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/spf13/cobra"
 )
@@ -80,6 +81,15 @@ echo "Hello" | crusher chat --ai-debug
 		if err := mcp.WaitForInit(ctx); err != nil {
 			return fmt.Errorf("failed to wait for MCP initialization: %w", err)
 		}
+
+		// Enable AI debug mode EARLY so that UpdateModels builds providers with debug HTTP client
+		if aiDebug {
+			log.SetAIDebug(true)
+			if verbosity == "raw" {
+				log.SetRawMode(true)
+			}
+		}
+
 		appInstance.AgentCoordinator.UpdateModels(ctx)
 
 		// Auto-approve permissions
@@ -200,7 +210,7 @@ echo "Hello" | crusher chat --ai-debug
 
 func init() {
 	chatCmd.Flags().Bool("ai-debug", false, "AI Debug mode: full transparency, X-ray vision into all internal operations")
-	chatCmd.Flags().String("verbosity", "normal", "Verbosity level for ai-debug mode: minimal, normal, full, tokens")
+	chatCmd.Flags().String("verbosity", "normal", "Verbosity level for ai-debug mode: minimal, normal, full, tokens, raw")
 	chatCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	chatCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
 	chatCmd.MarkFlagsMutuallyExclusive("session", "continue")
@@ -285,7 +295,7 @@ func runChatPrompt(ctx context.Context, appInstance *app.App, sessionID, prompt 
 					for i, entry := range auditEntries[start:] {
 						idx := start + i + 1
 						debugger.KV(fmt.Sprintf("[%d] %s", idx, entry.Timestamp.Format("15:04:05")),
-							fmt.Sprintf("%s | %s | %v", entry.Action, agent.StrategyName(entry.Strategy), entry.Success))
+							fmt.Sprintf("%s | %s | %v", entry.Action, agent.GetStrategyName(entry.Strategy), entry.Success))
 					}
 				}
 				fmt.Fprint(os.Stderr, debugger.String())

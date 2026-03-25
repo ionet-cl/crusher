@@ -7,21 +7,20 @@ import (
 
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
+	"github.com/charmbracelet/crush/internal/log"
 )
 
 // anthropicBuilder implements Builder for Anthropic.
 type anthropicBuilder struct{}
 
-func (b *anthropicBuilder) Build(ctx context.Context, cfg ProviderConfig, debug bool) (fantasy.Provider, error) {
+func (b *anthropicBuilder) Build(ctx context.Context, cfg ProviderConfig) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
 	switch {
 	case strings.HasPrefix(cfg.APIKey, "Bearer "):
-		// NOTE: Prevent the SDK from picking up the API key from env.
 		os.Setenv("ANTHROPIC_API_KEY", "")
 		cfg.Headers["Authorization"] = cfg.APIKey
 	case cfg.ID == "minimax" || cfg.ID == "minimax-china":
-		// NOTE: Prevent the SDK from picking up the API key from env.
 		os.Setenv("ANTHROPIC_API_KEY", "")
 		cfg.Headers["Authorization"] = "Bearer " + cfg.APIKey
 	case cfg.APIKey != "":
@@ -36,8 +35,8 @@ func (b *anthropicBuilder) Build(ctx context.Context, cfg ProviderConfig, debug 
 		opts = append(opts, anthropic.WithBaseURL(cfg.BaseURL))
 	}
 
-	if debug {
-		opts = append(opts, anthropic.WithHTTPClient(NewHTTPClient()))
+	if cfg.Debug {
+		opts = append(opts, anthropic.WithHTTPClient(log.NewHTTPClient()))
 	}
 
 	return anthropic.New(opts...)
