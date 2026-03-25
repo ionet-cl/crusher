@@ -36,6 +36,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/ghostcount"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -49,10 +50,12 @@ import (
 const (
 	DefaultSessionName = "Untitled Session"
 
-	// Constants for auto-summarization thresholds
-	largeContextWindowThreshold = 200_000
-	largeContextWindowBuffer    = 20_000
-	smallContextWindowRatio     = 0.2
+	// Auto-summarization thresholds:
+	// - Models > 200K context: use fixed 20K buffer
+	// - Models <= 200K context: use 20% of context as buffer
+	largeContextWindowThreshold = 200_000 // Tokens; above this use buffer-based threshold
+	largeContextWindowBuffer   = 20_000  // Fixed 20K tokens reserved for large models
+	smallContextWindowRatio    = 0.2     // 20% of context reserved for small models
 )
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
@@ -116,28 +119,43 @@ type sessionAgent struct {
 	isYolo               bool
 	notify               pubsub.Publisher[notify.Notification]
 
+	// GhostCount context management (optional)
+	enableGhostCount    bool
+	ghostCountEstimator ghostcount.TokenEstimator
+	ghostCountConfig    ghostcount.CompactionConfig
+	ghostCountTruncator ghostcount.ContextTruncator
+	ghostCountCompactor ghostcount.MessageCompactor
+
+	// CircuitBreaker auto-recovery (optional)
+	enableCircuitBreaker bool
+	recoveryManager      *RecoveryManager
+
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
 }
 
 type SessionAgentOptions struct {
-	LargeModel           Model
-	SmallModel           Model
-	SystemPromptPrefix   string
-	SystemPrompt         string
-	IsSubAgent           bool
-	DisableAutoSummarize bool
-	IsYolo               bool
-	Sessions             session.Service
-	Messages             message.Service
-	Tools                []fantasy.AgentTool
-	Notify               pubsub.Publisher[notify.Notification]
+	LargeModel            Model
+	SmallModel            Model
+	SystemPromptPrefix    string
+	SystemPrompt          string
+	IsSubAgent            bool
+	DisableAutoSummarize  bool
+	EnableGhostCount      bool
+	EnableCircuitBreaker  bool
+	IsYolo                bool
+	Sessions              session.Service
+	Messages              message.Service
+	Tools                 []fantasy.AgentTool
+	Notify                pubsub.Publisher[notify.Notification]
+	GhostCountEstimator   ghostcount.TokenEstimator
+	GhostCountConfig      ghostcount.CompactionConfig
 }
 
 func NewSessionAgent(
 	opts SessionAgentOptions,
 ) SessionAgent {
-	return &sessionAgent{
+	agent := &sessionAgent{
 		largeModel:           csync.NewValue(opts.LargeModel),
 		smallModel:           csync.NewValue(opts.SmallModel),
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
@@ -152,6 +170,32 @@ func NewSessionAgent(
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
 	}
+
+	// Initialize GhostCount if enabled
+	if opts.EnableGhostCount {
+		agent.enableGhostCount = true
+		agent.ghostCountEstimator = opts.GhostCountEstimator
+		if agent.ghostCountEstimator == nil {
+			agent.ghostCountEstimator = ghostcount.NewEstimator()
+		}
+		agent.ghostCountConfig = opts.GhostCountConfig
+		agent.ghostCountTruncator = ghostcount.NewTruncator()
+		agent.ghostCountCompactor = ghostcount.NewCompactor()
+	}
+
+	// Initialize CircuitBreaker if enabled
+	agent.enableCircuitBreaker = opts.EnableCircuitBreaker
+	if opts.EnableCircuitBreaker {
+		agent.recoveryManager = NewRecoveryManager(RecoveryManagerOptions{
+			EnableGhostCount:     opts.EnableGhostCount,
+			EnableCircuitBreaker: opts.EnableCircuitBreaker,
+			Messages:             opts.Messages,
+			Sessions:             opts.Sessions,
+			GhostCompact:         agent.GhostCompact,
+		})
+	}
+
+	return agent
 }
 
 func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -249,6 +293,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	var currentAssistant *message.Message
 	var shouldSummarize bool
+	var shouldCompact bool
 	result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 		Files:            files,
@@ -427,6 +472,28 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				} else {
 					threshold = int64(float64(cw) * smallContextWindowRatio)
 				}
+
+				// Use ghostcount for smarter context management if enabled
+				if a.enableGhostCount && a.ghostCountEstimator != nil {
+					msgs, err := a.getSessionMessages(ctx, currentSession)
+					if err == nil && len(msgs) > 0 {
+						// Convert messages to strings for ghostcount
+						texts := make([]string, len(msgs))
+						for i, m := range msgs {
+							texts[i] = fmt.Sprintf("%s: %s", m.Role, m.Content().Text)
+						}
+						ghostTokens := a.ghostCountEstimator.EstimateMessages(texts)
+						// Use ghost tokens for remaining calculation
+						ghostRemaining := cw - int64(ghostTokens)
+						if ghostRemaining <= int64(a.ghostCountConfig.HistoryThreshold) {
+							shouldCompact = true
+							return true
+						}
+						return false
+					}
+				}
+
+				// Fallback to original token counting
 				if (remaining <= threshold) && !a.disableAutoSummarize {
 					shouldSummarize = true
 					return true
@@ -442,6 +509,50 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
 	if err != nil {
+		// Structured error logging for full audit trail
+		var provErr *fantasy.ProviderError
+		if errors.As(err, &provErr) {
+			LogProviderError(provErr, call.SessionID)
+			slog.Error("agent_run: provider error",
+				"sid", call.SessionID,
+				"error_type", "provider",
+				"title", provErr.Title,
+				"message", provErr.Message,
+				"status_code", provErr.StatusCode,
+				"context_too_large", provErr.IsContextTooLarge(),
+				"retryable", provErr.IsRetryable(),
+				"original_error", err)
+		} else {
+			slog.Error("agent_run: error",
+				"sid", call.SessionID,
+				"error_type", "generic",
+				"error", err)
+		}
+
+		// Try to auto-recover if CircuitBreaker is enabled
+		if a.recoveryManager != nil {
+			slog.Info("agent_run: attempting circuit breaker recovery",
+				"sid", call.SessionID,
+				"error", err)
+			recovered, recoveryErr := a.recoveryManager.AttemptRecovery(ctx, call, err)
+			if recoveryErr == nil && recovered {
+				// Recovery succeeded - retry the operation
+				slog.Info("agent_run: recovery succeeded, retrying agent",
+					"sid", call.SessionID,
+					"recovery_attempts", circuitBreakerRetryCount[call.SessionID])
+				return a.Run(ctx, call)
+			}
+			if recoveryErr != nil {
+				slog.Error("agent_run: recovery failed",
+					"sid", call.SessionID,
+					"error", recoveryErr)
+			} else if !recovered {
+				slog.Warn("agent_run: error not recoverable",
+					"sid", call.SessionID,
+					"error", err)
+			}
+		}
+
 		isCancelErr := errors.Is(err, context.Canceled)
 		isPermissionErr := errors.Is(err, permission.ErrorPermissionDenied)
 		if currentAssistant == nil {
@@ -565,6 +676,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				existing = []SessionAgentCall{}
 			}
 			call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
+			existing = append(existing, call)
+			a.messageQueue.Set(call.SessionID, existing)
+		}
+	}
+
+	// GhostCount compaction (non-blocking alternative to summarization)
+	if shouldCompact && a.enableGhostCount {
+		a.activeRequests.Del(call.SessionID)
+		if compactErr := a.GhostCompact(ctx, call.SessionID, false); compactErr != nil {
+			// Log but don't fail - fallback to continuing
+			slog.Warn("ghost compact failed", "error", compactErr)
+		}
+		// If the agent wasn't done, re-queue
+		if len(currentAssistant.ToolCalls()) > 0 {
+			existing, ok := a.messageQueue.Get(call.SessionID)
+			if !ok {
+				existing = []SessionAgentCall{}
+			}
+			call.Prompt = fmt.Sprintf("The previous session was interrupted due to context limits, the initial user request was: `%s`", call.Prompt)
 			existing = append(existing, call)
 			a.messageQueue.Set(call.SessionID, existing)
 		}
@@ -696,6 +826,114 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	currentSession.PromptTokens = 0
 	_, err = a.sessions.Save(genCtx, currentSession)
 	return err
+}
+
+// GhostCompact performs non-blocking context compaction using ghostcount.
+// It truncates/prunes old messages without generating a summary.
+// If forceCompact is true, compaction is attempted even if under normal threshold
+// (used when API reports context error).
+func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string, forceCompact bool) error {
+	if !a.enableGhostCount {
+		slog.Debug("ghost compact: not enabled")
+		return nil // GhostCount not enabled
+	}
+
+	currentSession, err := a.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get session: %w", err)
+	}
+
+	msgs, err := a.messages.List(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		slog.Debug("ghost compact: no messages")
+		return nil
+	}
+
+	slog.Info("ghost compact: starting",
+		"session", sessionID,
+		"message_count", len(msgs),
+		"config_history_threshold", a.ghostCountConfig.HistoryThreshold,
+		"context_window", a.ghostCountConfig.ContextWindow,
+		"force", forceCompact)
+
+	// Convert messages to ghostcount.Message interface
+	gcMessages := make([]ghostcount.Message, len(msgs))
+	for i := range msgs {
+		gcMessages[i] = &messageAdapter{message: &msgs[i]}
+	}
+
+	var result ghostcount.CompactionResult
+
+	if forceCompact {
+		// Force compaction with very aggressive budget (fixed 1500 tokens)
+		// This is used when API reports context error - we need to reduce significantly
+		aggressiveBudget := 1500
+		compactConfig := ghostcount.CompactionConfig{
+			ContextWindow:     a.ghostCountConfig.ContextWindow,
+			MaxResponseTokens: a.ghostCountConfig.MaxResponseTokens,
+			HistoryThreshold:  aggressiveBudget,
+		}
+		slog.Info("ghost compact: using aggressive budget", "budget", aggressiveBudget)
+		result = a.ghostCountCompactor.Compact(ctx, gcMessages, compactConfig, a.ghostCountEstimator, a.ghostCountTruncator)
+	} else {
+		// Normal compaction based on threshold
+		result = a.ghostCountCompactor.Compact(ctx, gcMessages, a.ghostCountConfig, a.ghostCountEstimator, a.ghostCountTruncator)
+	}
+
+	slog.Info("ghost compact: result",
+		"was_compacted", result.WasCompacted,
+		"tokens_before", result.TokensBefore,
+		"tokens_after", result.TokensAfter,
+		"async_recommended", result.AsyncRecommended,
+		"result_messages_count", len(result.Messages))
+
+	if !result.WasCompacted {
+		slog.Debug("ghost compact: no compaction needed")
+		return nil // No compaction needed
+	}
+
+	// Mark the compaction point - find first message that was actually kept
+	// Note: result.Messages may be reordered by HardPrune, so we can't use indices directly
+	if len(result.Messages) > 0 {
+		// Find the first message in the compacted result that was wrapped in messageAdapter
+		// The messageAdapter wraps the original message, so we need to get its ID
+		for _, msg := range result.Messages {
+			if adapter, ok := msg.(*messageAdapter); ok {
+				// Found the first kept message - use its ID as the compaction boundary
+				currentSession.SummaryMessageID = adapter.message.ID
+				currentSession.CompletionTokens = 0
+				currentSession.PromptTokens = 0
+				_, err = a.sessions.Save(ctx, currentSession)
+				if err != nil {
+					return err
+				}
+				break
+			}
+		}
+	}
+
+	slog.Info("ghost compact completed",
+		"tokens_before", result.TokensBefore,
+		"tokens_after", result.TokensAfter,
+		"async_recommended", result.AsyncRecommended)
+
+	return nil
+}
+
+// messageAdapter wraps a crush message.Message to implement ghostcount.Message.
+type messageAdapter struct {
+	message *message.Message
+}
+
+func (m *messageAdapter) GetRole() string {
+	return string(m.message.Role)
+}
+
+func (m *messageAdapter) GetContent() string {
+	return m.message.Content().Text
 }
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {

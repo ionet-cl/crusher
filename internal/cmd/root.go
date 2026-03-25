@@ -44,6 +44,7 @@ func init() {
 
 	rootCmd.AddCommand(
 		runCmd,
+		chatCmd,
 		dirsCmd,
 		projectsCmd,
 		updateProvidersCmd,

@@ -157,11 +157,11 @@ func (app *App) AgentNotifications() *pubsub.Broker[notify.Notification] {
 	return app.agentNotifications
 }
 
-// resolveSession resolves which session to use for a non-interactive run
+// ResolveSession resolves which session to use for a non-interactive run
 // If continueSessionID is set, it looks up that session by ID
 // If useLast is set, it returns the most recently updated top-level session
 // Otherwise, it creates a new session
-func (app *App) resolveSession(ctx context.Context, continueSessionID string, useLast bool) (session.Session, error) {
+func (app *App) ResolveSession(ctx context.Context, continueSessionID string, useLast bool) (session.Session, error) {
 	switch {
 	case continueSessionID != "":
 		if app.Sessions.IsAgentToolSession(continueSessionID) {
@@ -258,7 +258,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 
 	defer stopSpinner()
 
-	sess, err := app.resolveSession(ctx, continueSessionID, useLast)
+	sess, err := app.ResolveSession(ctx, continueSessionID, useLast)
 	if err != nil {
 		return fmt.Errorf("failed to create session for non-interactive mode: %w", err)
 	}
@@ -357,6 +357,213 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			return ctx.Err()
 		}
 	}
+}
+
+// RunNonInteractiveDebug runs the application in non-interactive debug mode with full transparency.
+// This mode provides "X-ray vision" into all internal operations: audit trails, circuit breaker
+// decisions, ghost compact operations, token usage, and all internal state changes.
+func (app *App) RunNonInteractiveDebug(ctx context.Context, output io.Writer, prompt, largeModel, smallModel string, continueSessionID string, useLast bool) error {
+	slog.Info("Running in AI DEBUG mode - full transparency enabled")
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Override models if specified
+	if largeModel != "" || smallModel != "" {
+		if err := app.overrideModelsForNonInteractive(ctx, largeModel, smallModel); err != nil {
+			return fmt.Errorf("failed to override models: %w", err)
+		}
+	}
+
+	// Wait for MCP initialization to complete before reading MCP tools.
+	if err := mcp.WaitForInit(ctx); err != nil {
+		return fmt.Errorf("failed to wait for MCP initialization: %w", err)
+	}
+
+	// Force update of agent models before running so MCP tools are loaded
+	app.AgentCoordinator.UpdateModels(ctx)
+
+	// Create debugger
+	debugger := agent.NewAIDebugger(agent.DefaultDebugConfig())
+	sessionID := continueSessionID
+
+	// Resolve or create session
+	sess, err := app.ResolveSession(ctx, continueSessionID, useLast)
+	if err != nil {
+		return fmt.Errorf("failed to create session for debug mode: %w", err)
+	}
+	sessionID = sess.ID
+
+	// Print session info
+	debugger.Header("AI DEBUG SESSION START")
+	debugger.KV("SessionID", sessionID)
+	debugger.KV("Mode", "AI_DEBUG (X-RAY VISION)")
+	debugger.KV("Prompt", prompt)
+	debugger.KV("ContinueSession", continueSessionID != "" || useLast)
+	if continueSessionID != "" {
+		debugger.KV("ContinuingSession", continueSessionID)
+	} else if useLast {
+		debugger.KV("UsingLastSession", true)
+	}
+
+	// Print model info
+	model := app.AgentCoordinator.Model()
+	if model.Model != nil {
+		debugger.KV("Model", model.ModelCfg.Model)
+		debugger.KV("Provider", model.ModelCfg.Provider)
+		debugger.KV("ContextWindow", model.CatwalkCfg.ContextWindow)
+	}
+
+	// Print config
+	cfg := app.config.Config()
+	debugger.KV("CircuitBreakerEnabled", cfg.Options.EnableCircuitBreaker)
+	debugger.KV("GhostCountEnabled", cfg.Options.EnableGhostCount)
+
+	// Auto-approve permissions
+	app.Permissions.AutoApproveSession(sess.ID)
+
+	// Clear audit trail for fresh debug run
+	agent.ClearAuditTrail()
+
+	// Output debug header to stderr (not stdout, to keep output clean)
+	fmt.Fprintf(os.Stderr, "%s", debugger.String())
+	debugger.Reset()
+
+	// Channel for results
+	type response struct {
+		result *fantasy.AgentResult
+		err    error
+	}
+	done := make(chan response, 1)
+
+	startTime := time.Now()
+
+	go func(ctx context.Context, sessionID, prompt string) {
+		result, err := app.AgentCoordinator.Run(ctx, sessionID, prompt)
+		if err != nil {
+			done <- response{err: fmt.Errorf("failed to start agent processing stream: %w", err)}
+			return
+		}
+		done <- response{result: result}
+	}(ctx, sess.ID, prompt)
+
+	// Subscribe to message events for debug output
+	messageEvents := app.Messages.Subscribe(ctx)
+	messageReadBytes := make(map[string]int)
+
+	// Main event loop
+	for {
+		select {
+		case result := <-done:
+			// Agent finished
+			duration := time.Since(startTime)
+
+			// Print final audit trail
+			auditEntries := agent.GetAuditTrail()
+			debugger.Header("FINAL AUDIT TRAIL")
+			debugger.PrintAllAuditTrail(auditEntries)
+			debugger.PrintSummary(auditEntries, agent.GetCircuitBreakerRetryCount(sessionID))
+
+			// Print agent end
+			if result.err != nil {
+				debugger.Header("AGENT END (WITH ERROR)")
+				debugger.KV("Duration", duration)
+				debugger.KV("Success", false)
+				debugger.KV("Error", result.err.Error())
+
+				// Check if it's a provider error
+				var provErr *fantasy.ProviderError
+				if errors.As(result.err, &provErr) {
+					agent.LogProviderError(provErr, sessionID)
+					debugger.PrintProviderError(sessionID, &agent.ProviderErrorWrapper{
+						Title:             provErr.Title,
+						Message:           provErr.Message,
+						StatusCode:        provErr.StatusCode,
+						ContextTooLarge:   provErr.IsContextTooLarge(),
+						Retryable:         provErr.IsRetryable(),
+						ContextUsedTokens: provErr.ContextUsedTokens,
+						ContextMaxTokens:  provErr.ContextMaxTokens,
+					})
+				}
+			} else {
+				debugger.Header("AGENT END (SUCCESS)")
+				debugger.KV("Duration", duration)
+				debugger.KV("Success", true)
+			}
+
+			// Print debug output to stderr
+			fmt.Fprintf(os.Stderr, "%s", debugger.String())
+
+			if result.err != nil {
+				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
+					return nil
+				}
+				return fmt.Errorf("agent processing failed: %w", result.err)
+			}
+			return nil
+
+		case event := <-messageEvents:
+			msg := event.Payload
+
+			// Debug output for each message
+			if msg.SessionID == sess.ID {
+				if msg.Role == message.Assistant && len(msg.Parts) > 0 {
+					// Print assistant message start
+					content := msg.Content().String()
+					readBytes := messageReadBytes[msg.ID]
+
+					if len(content) < readBytes {
+						slog.Error("Message content is shorter than read bytes",
+							"message_length", len(content), "read_bytes", readBytes)
+						return fmt.Errorf("message content is shorter than read bytes: %d < %d", len(content), readBytes)
+					}
+
+					part := content[readBytes:]
+					if readBytes == 0 {
+						part = strings.TrimLeft(part, " \t")
+					}
+
+					// Output to stdout (the actual response)
+					if strings.TrimSpace(part) != "" {
+						fmt.Fprint(output, part)
+					}
+					messageReadBytes[msg.ID] = len(content)
+				} else if msg.Role == message.User {
+					// Print user message in debug mode
+					debugger.SubHeader(fmt.Sprintf("USER MESSAGE [%s]", msg.ID))
+					debugger.KV("Content", truncateString(msg.Content().Text, 200))
+					fmt.Fprintf(os.Stderr, "%s", debugger.String())
+					debugger.Reset()
+				} else if msg.Role == message.Tool {
+					// Print tool result in debug mode
+					for _, tr := range msg.ToolResults() {
+						debugger.SubHeader(fmt.Sprintf("TOOL RESULT [%s]", tr.Name))
+						debugger.KV("ToolCallID", tr.ToolCallID)
+						debugger.KV("Content", truncateString(tr.Content, 300))
+						if tr.IsError {
+							debugger.KV("IsError", true)
+						}
+						fmt.Fprintf(os.Stderr, "%s", debugger.String())
+						debugger.Reset()
+					}
+				}
+			}
+
+		case <-ctx.Done():
+			// Print final audit trail on cancellation
+			debugger.Header("SESSION CANCELLED - FINAL AUDIT TRAIL")
+			debugger.PrintAllAuditTrail(agent.GetAuditTrail())
+			fmt.Fprintf(os.Stderr, "%s", debugger.String())
+			return ctx.Err()
+		}
+	}
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func (app *App) UpdateAgentModel(ctx context.Context) error {
