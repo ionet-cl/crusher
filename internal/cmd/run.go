@@ -38,6 +38,10 @@ crush run --quiet "Generate a README for this project"
 # Run in verbose mode (show logs)
 crush run --verbose "Generate a README for this project"
 
+# AI DEBUG MODE: Full transparency, X-ray vision into all internal operations
+# Shows: audit trails, circuit breaker decisions, ghost compact, token usage
+crush run --ai-debug "Your prompt here"
+
 # Continue a previous session
 crush run --session {session-id} "Follow up on your last response"
 
@@ -49,6 +53,7 @@ crush run --continue "Follow up on your last response"
 		var (
 			quiet, _      = cmd.Flags().GetBool("quiet")
 			verbose, _    = cmd.Flags().GetBool("verbose")
+			aiDebug, _    = cmd.Flags().GetBool("ai-debug")
 			largeModel, _ = cmd.Flags().GetString("model")
 			smallModel, _ = cmd.Flags().GetString("small-model")
 			sessionID, _  = cmd.Flags().GetString("session")
@@ -103,6 +108,9 @@ crush run --continue "Follow up on your last response"
 			event.SetContinueLastSession(true)
 		}
 
+		if aiDebug {
+			return app.RunNonInteractiveDebug(ctx, os.Stdout, prompt, largeModel, smallModel, sessionID, useLast)
+		}
 		return app.RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
 	},
 }
@@ -110,6 +118,7 @@ crush run --continue "Follow up on your last response"
 func init() {
 	runCmd.Flags().BoolP("quiet", "q", false, "Hide spinner")
 	runCmd.Flags().BoolP("verbose", "v", false, "Show logs")
+	runCmd.Flags().Bool("ai-debug", false, "AI Debug mode: pure CLI with full transparency, X-ray vision into all internal operations")
 	runCmd.Flags().StringP("model", "m", "", "Model to use. Accepts 'model' or 'provider/model' to disambiguate models with the same name across providers")
 	runCmd.Flags().String("small-model", "", "Small model to use. If not provided, uses the default small model for the provider")
 	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
