@@ -381,6 +381,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
 	enableGhostCount := c.cfg.Config().Options.EnableGhostCount
+	enableCircuitBreaker := c.cfg.Config().Options.EnableCircuitBreaker
 
 	// Build base options
 	agentOpts := SessionAgentOptions{
@@ -391,6 +392,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		IsSubAgent:            isSubAgent,
 		DisableAutoSummarize:   c.cfg.Config().Options.DisableAutoSummarize,
 		EnableGhostCount:      enableGhostCount,
+		EnableCircuitBreaker:  enableCircuitBreaker,
 		IsYolo:                c.permissions.SkipRequests(),
 		Sessions:              c.sessions,
 		Messages:              c.messages,

@@ -31,6 +31,7 @@ import (
 	"charm.land/fantasy/providers/openrouter"
 	"charm.land/fantasy/providers/vercel"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent/circuit"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -126,6 +127,9 @@ type sessionAgent struct {
 	ghostCountTruncator ghostcount.ContextTruncator
 	ghostCountCompactor ghostcount.MessageCompactor
 
+	// CircuitBreaker auto-recovery (optional)
+	enableCircuitBreaker bool
+
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
 }
@@ -138,6 +142,7 @@ type SessionAgentOptions struct {
 	IsSubAgent            bool
 	DisableAutoSummarize  bool
 	EnableGhostCount      bool
+	EnableCircuitBreaker  bool
 	IsYolo                bool
 	Sessions              session.Service
 	Messages              message.Service
@@ -177,6 +182,9 @@ func NewSessionAgent(
 		agent.ghostCountTruncator = ghostcount.NewTruncator()
 		agent.ghostCountCompactor = ghostcount.NewCompactor()
 	}
+
+	// Initialize CircuitBreaker if enabled
+	agent.enableCircuitBreaker = opts.EnableCircuitBreaker
 
 	return agent
 }
@@ -492,6 +500,29 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
 	if err != nil {
+		// Try to auto-recover if CircuitBreaker is enabled
+		if a.enableCircuitBreaker {
+			errInfo := circuit.Detect(err)
+			if errInfo.IsRecoverable && a.canRetry(call.SessionID) {
+				slog.Info("circuit breaker: recoverable error, attempting recovery",
+					"strategy", errInfo.Strategy,
+					"session", call.SessionID,
+					"error", errInfo.ErrMsg)
+
+				recoveryErr := a.attemptRecovery(ctx, call, errInfo)
+				if recoveryErr == nil {
+					slog.Info("circuit breaker: recovery successful",
+						"session", call.SessionID)
+					// Recovery worked, don't return error
+					return result, nil
+				}
+				slog.Warn("circuit breaker: recovery failed",
+					"session", call.SessionID,
+					"error", recoveryErr)
+				// Fall through to normal error handling
+			}
+		}
+
 		isCancelErr := errors.Is(err, context.Canceled)
 		isPermissionErr := errors.Is(err, permission.ErrorPermissionDenied)
 		if currentAssistant == nil {
@@ -833,6 +864,99 @@ func (a *sessionAgent) GhostCompact(ctx context.Context, sessionID string) error
 		"async_recommended", result.AsyncRecommended)
 
 	return nil
+}
+
+const maxCircuitBreakerRetries = 2
+
+// circuitBreakerRetryCount tracks retry attempts per session.
+var circuitBreakerRetryCount = make(map[string]int)
+
+// canRetry checks if we have retries remaining for this session.
+func (a *sessionAgent) canRetry(sessionID string) bool {
+	count := circuitBreakerRetryCount[sessionID]
+	if count >= maxCircuitBreakerRetries {
+		return false
+	}
+	circuitBreakerRetryCount[sessionID] = count + 1
+	return true
+}
+
+// attemptRecovery tries to recover from an error based on the strategy.
+func (a *sessionAgent) attemptRecovery(ctx context.Context, call SessionAgentCall, errInfo circuit.ErrInfo) error {
+	recoveryErr := errors.New(errInfo.ErrMsg)
+
+	switch errInfo.Strategy {
+	case circuit.StrategyGhostCompact:
+		// Compact context and retry
+		if a.enableGhostCount {
+			if compactErr := a.GhostCompact(ctx, call.SessionID); compactErr != nil {
+				slog.Warn("circuit breaker: GhostCompact failed during recovery", "error", compactErr)
+			}
+		}
+		// Inject recovery message
+		recoveryMsg := circuit.BuildRecoveryMessage(recoveryErr)
+		_, createErr := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+			Role:  message.User,
+			Parts: []message.ContentPart{message.TextContent{Text: recoveryMsg}},
+		})
+		if createErr != nil {
+			return createErr
+		}
+		// Retry the run
+		result, runErr := a.Run(ctx, call)
+		if runErr != nil {
+			return runErr
+		}
+		_ = result // success
+		return nil
+
+	case circuit.StrategyWaitAndRetry:
+		// Wait for the specified delay
+		if errInfo.Delay > 0 {
+			slog.Info("circuit breaker: waiting before retry", "delay", errInfo.Delay)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(errInfo.Delay):
+			}
+		}
+		// Inject recovery message and retry
+		recoveryMsg := circuit.BuildRecoveryMessage(recoveryErr)
+		_, createErr := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+			Role:  message.User,
+			Parts: []message.ContentPart{message.TextContent{Text: recoveryMsg}},
+		})
+		if createErr != nil {
+			return createErr
+		}
+		result, runErr := a.Run(ctx, call)
+		if runErr != nil {
+			return runErr
+		}
+		_ = result // success
+		return nil
+
+	case circuit.StrategyCleanAndRetry:
+		// Clean corrupted messages and retry
+		// For now, just inject recovery message
+		recoveryMsg := circuit.BuildRecoveryMessage(recoveryErr)
+		_, createErr := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+			Role:  message.User,
+			Parts: []message.ContentPart{message.TextContent{Text: recoveryMsg}},
+		})
+		if createErr != nil {
+			return createErr
+		}
+		result, runErr := a.Run(ctx, call)
+		if runErr != nil {
+			return runErr
+		}
+		_ = result // success
+		return nil
+
+	default:
+		return fmt.Errorf("circuit breaker: unknown strategy %d", errInfo.Strategy)
+	}
 }
 
 // messageAdapter wraps a crush message.Message to implement ghostcount.Message.

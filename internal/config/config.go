@@ -248,6 +248,7 @@ type Options struct {
 	DebugLSP                  bool         `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
 	DisableAutoSummarize      bool         `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
 	EnableGhostCount          bool         `json:"enable_ghost_count,omitempty" jsonschema:"description=Enable ghostcount-based context management (semantic token estimation),default=false"`
+	EnableCircuitBreaker      bool         `json:"enable_circuit_breaker,omitempty" jsonschema:"description=Enable auto-recovery on provider errors (context too large, rate limit, etc.),default=false"`
 	DataDirectory             string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data (relative to working directory),default=.crush,example=.crush"` // Relative to the cwd
 	DisabledTools             []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
 	DisableProviderAutoUpdate bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
