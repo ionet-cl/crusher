@@ -411,18 +411,11 @@ func (d *AIDebugger) PrintThinkChunk(content string) {
 
 // PrintBanner prints an initial banner for AI debug mode.
 func (d *AIDebugger) PrintBanner(sessionID string, model string) {
-	d.output.WriteString(fmt.Sprintf(`
-%s ╔══════════════════════════════════════════════════════════╗%s
-%s ║%s  CRUSHER AI DEBUG  %s║
-%s ╠══════════════════════════════════════════════════════════╣
-%s ║%s  Session: %s   Model: %s%s
-%s ║%s  Type 'quit' to exit  •  'clear' to clear screen     %s
-%s ╚══════════════════════════════════════════════════════════╝%s
-`,
+	d.output.WriteString(fmt.Sprintf("\n%s ╔══════════════════════════════════════════════════════════╗%s\n%s ║%s  CRUSHER AI DEBUG  ║%s\n%s ╠══════════════════════════════════════════════════════════╣%s\n%s ║  Session: %-8s  Model: %s%s\n%s ║  Type 'quit' to exit  •  'clear' to clear screen           ║%s\n%s ╚══════════════════════════════════════════════════════════╝%s\n",
 		_CYAN, _RESET,
-		_CYAN, _RESET, "",
 		_CYAN, _RESET,
-		_CYAN, _RESET, _WHITE+sessionID[:8]+_RESET, _CYAN, _WHITE+model+_RESET,
+		_CYAN, _RESET,
+		_CYAN, _RESET, sessionID[:8], _CYAN, _WHITE+model+_RESET,
 		_CYAN, _RESET,
 		_CYAN, _RESET))
 }
