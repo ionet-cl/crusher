@@ -3,6 +3,10 @@ package circuit
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"charm.land/fantasy"
@@ -45,6 +49,16 @@ func Detect(err error) ErrInfo {
 		return ErrInfo{
 			IsRecoverable: false,
 			ErrMsg:        fantasyErr.Message,
+		}
+	}
+
+	// Check for net errors (connection reset, refused, timeout, EOF)
+	if isNetError(err) {
+		return ErrInfo{
+			IsRecoverable: true,
+			Strategy:      StrategyWaitAndRetry,
+			Delay:         3 * time.Second,
+			ErrMsg:        err.Error(),
 		}
 	}
 
