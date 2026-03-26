@@ -614,6 +614,12 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 }
 
 func (c *coordinator) isAnthropicThinking(model config.SelectedModel) bool {
+	// MiniMax's Anthropic-compatible endpoint has a very small context window
+	// (~2013 tokens) which doesn't support thinking feature.
+	if model.Provider == "minimax" || model.Provider == "minimax-china" {
+		return false
+	}
+
 	if model.Think {
 		return true
 	}
