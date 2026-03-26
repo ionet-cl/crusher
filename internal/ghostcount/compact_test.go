@@ -124,25 +124,57 @@ func TestCompactor_Compact_ProtectsDREA(t *testing.T) {
 }
 
 func TestCompactor_Compact_ProtectsActiveSymbols(t *testing.T) {
-	c := NewCompactor().(*compactor)
+	c := NewCompactor()
 	e := NewEstimator()
 	tr := NewTruncator()
 
 	messages := []Message{
+		newMockMessage("system", "You are a helpful assistant"),
 		newMockMessage("user", "Please modify the function foo() in bar.go"),
 		newMockMessage("assistant", "I'll modify foo() in bar.go"),
 		newMockMessage("tool_result", "Modified bar.go:foo() - changes applied"),
+		newMockMessage("user", "What was the result?"),
 	}
 
-	cfg := NewCompactionConfig(100, 50) // very small budget
-	// Note: activeSymbols would be passed in HardPrune for symbol-aware retention
-	// For now, basic retention matrix doesn't do symbol detection without it
+	// Very small budget that would normally prune too much
+	// but active symbols should be preserved
+	cfg := CompactionConfig{
+		ContextWindow:     100,
+		MaxResponseTokens: 50,
+		HistoryThreshold:  60,
+		ActiveSymbols:     []string{"foo()", "bar.go"},
+	}
 
-	_ = tr
-	_ = c
-	_ = e
-	_ = messages
-	_ = cfg
+	result := c.Compact(nil, messages, cfg, e, tr)
+
+	if !result.WasCompacted {
+		t.Errorf("should have compacted with small budget")
+	}
+
+	// Check that messages mentioning active symbols are preserved
+	foundActiveSymbol := false
+	for _, msg := range result.Messages {
+		content := msg.GetContent()
+		if containsSymbol(content, "foo()") || containsSymbol(content, "bar.go") {
+			foundActiveSymbol = true
+			break
+		}
+	}
+	if !foundActiveSymbol {
+		t.Errorf("messages with active symbols should be preserved")
+	}
+
+	// System message must always be preserved
+	foundSystem := false
+	for _, msg := range result.Messages {
+		if msg.GetRole() == "system" {
+			foundSystem = true
+			break
+		}
+	}
+	if !foundSystem {
+		t.Errorf("system message should always be preserved")
+	}
 }
 
 func TestRetentionMatrix_ClassifyMessage_System(t *testing.T) {

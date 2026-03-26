@@ -134,8 +134,8 @@ func (c *compactor) Compact(_ interface{}, messages []Message, cfg CompactionCon
 		}
 	}
 
-	// Step 2: Hard prune using RetentionMatrix
-	compacted := c.HardPrune(messages, cfg.HistoryThreshold, estimator, nil)
+	// Step 2: Hard prune using RetentionMatrix with active symbols awareness
+	compacted := c.HardPrune(messages, cfg.HistoryThreshold, estimator, cfg.ActiveSymbols)
 	textsAfter := messagesToStrings(compacted)
 	tokensAfter := estimator.EstimateMessages(textsAfter)
 

@@ -52,6 +52,9 @@ type CompactionConfig struct {
 	MaxResponseTokens int
 	// Calculated: (ContextWindow - MaxResponseTokens) * 0.85
 	HistoryThreshold int
+	// ActiveSymbols are code symbols (functions, files) being actively edited.
+	// Messages containing these symbols get RetainPriority level.
+	ActiveSymbols []string
 }
 
 // NewCompactionConfig creates a CompactionConfig with derived values.
