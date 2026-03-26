@@ -134,6 +134,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return nil, err
 	}
 
+	// Try multiplex first for multi-file/multi-module tasks
+	if mplexResult, err := c.runWithMultiplex(ctx, sessionID, prompt, attachments); err == nil && mplexResult != nil {
+		return mplexResult, nil
+	}
+
 	// refresh models before each run
 	if err := c.UpdateModels(ctx); err != nil {
 		return nil, fmt.Errorf("failed to update models: %w", err)
