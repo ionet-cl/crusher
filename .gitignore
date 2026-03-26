@@ -62,3 +62,9 @@ crusher
 
 # Scripts with API keys
 scripts/
+
+# Crush binaries
+crush
+crusher
+crush-test
+crush-main-bin
