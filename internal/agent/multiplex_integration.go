@@ -76,12 +76,12 @@ func (c *coordinator) runWithMultiplex(
 		return nil, nil // Not enough intents to parallelize
 	}
 
-	// Create supervisor with real agent
+	// Create supervisor with real agent, using shared session ID
 	runner := &multiplexRunner{coordinator: c}
 	supervisor := multiplex.NewSupervisor(ctx, multiplex.SupervisorConfig{
 		Name:        "auto-multiplex",
 		PoolSize:    4,
-		ProcessFunc: multiplex.AgentProcessFunc(runner),
+		ProcessFunc: multiplex.AgentProcessFunc(runner, sessionID),
 		PartitionConfig: multiplex.PartitionConfig{
 			MaxIntents:         20,
 			MaxTokensPerIntent: 40000,
