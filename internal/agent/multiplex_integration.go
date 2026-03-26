@@ -14,7 +14,8 @@ type multiplexRunner struct {
 	coordinator *coordinator
 }
 
-func (m *multiplexRunner) Run(ctx context.Context, sessionID string, prompt string) (multiplex.AgentResult, error) {
+func (m *multiplexRunner) Run(ctx context.Context, sessionID string, prompt string, fileContents map[string]string) (multiplex.AgentResult, error) {
+	// fileContents is already included in prompt by AgentProcessFunc, so we just pass the prompt
 	result, err := m.coordinator.currentAgent.Run(ctx, SessionAgentCall{
 		SessionID: sessionID,
 		Prompt:    prompt,
