@@ -434,7 +434,7 @@ func (d *AIDebugger) PrintToolCall(name string, input map[string]interface{}, ou
 		icon = _ICON_ERROR
 	}
 
-	d.output.WriteString(fmt.Sprintf("\n%s %s%s%s #%d: %s%s\n",
+	d.output.WriteString(fmt.Sprintf("\n%s %s%s%s #%d: %s\n",
 		_MAGENTA+"┌─"+_RESET,
 		icon,
 		_BOLD+name+_RESET,
@@ -541,13 +541,13 @@ func (d *AIDebugger) PrintGhostCompactAlert(beforeTokens, afterTokens int, err e
 	}
 
 	d.output.WriteString(fmt.Sprintf(`
-%$s ╔═══════════════════════════════════════════════════════════════╗%s
-%$s ║%s  %$s⚡ GHOST COMPACT%s                                     %s║%s
-%$s ╠═══════════════════════════════════════════════════════════════╣%s
-%$s ║%s  Antes:  %$s%s%s  %d tokens                        %s║%s
-%$s ║%s  Después: %s%s%s  %d tokens                        %s║%s
-%$s ║%s  %s▲ %.0f%% reduction%s (%d tokens saved)                   %s║%s
-%$s ╚═══════════════════════════════════════════════════════════════╝%s
+%s ╔═══════════════════════════════════════════════════════════════╗%s
+%s ║%s  %s⚡ GHOST COMPACT%s                                     %s║%s
+%s ╠═══════════════════════════════════════════════════════════════╣%s
+%s ║%s  Antes:  %s%s%s  %d tokens                        %s║%s
+%s ║%s  Después: %s%s%s  %d tokens                        %s║%s
+%s ║%s  %s▲ %.0f%% reduction%s (%d tokens saved)                   %s║%s
+%s ╚═══════════════════════════════════════════════════════════════╝%s
 `,
 		_RED, _RESET,
 		_RED, _RESET, _BOLD, _RESET, _RED, _RESET,
